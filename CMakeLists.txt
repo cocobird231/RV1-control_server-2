@@ -36,7 +36,7 @@ find_package(vehicle_interfaces REQUIRED)
 ## Build
 add_executable(server src/main.cpp)
 ament_target_dependencies(server rclcpp vehicle_interfaces)
-target_link_libraries(server IDClient)
+# target_link_libraries(server IDClient)
 
 ## Install
 install(TARGETS
