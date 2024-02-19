@@ -1,0 +1,10 @@
+{
+    "device" : "/dev/input/js0", 
+    "brakeBtn" : {"value" : 1, "type" : 1, "number" : 0}, 
+    "releaseBrakeBtn" : {"value" : 1, "type" : 1, "number" : 1}, 
+    "enableSafetyBtn" : {"value" : 1, "type" : 1, "number" : 2}, 
+    "disableSafetyBtn" : {"value" : 1, "type" : 1, "number" : 3}, 
+    "initBtn" : {"value" : 1, "type" : 1, "number" : 8}, 
+    "ascentIdxBtn" : {"value" : 32767, "type" : 2, "number" : 6}, 
+    "descentIdxBtn" : {"value" : -32767, "type" : 2, "number" : 6}
+}

@@ -1,0 +1,65 @@
+#ver=2.0
+---
+# Chassis configuration file
+chassis_prop:
+    chassisFilePath : "chassis.json"
+    joystickFilePath : "joystick.json"
+
+# Internal ID server config (Jim)
+internal_prop:
+    hostIP : "192.168.1.42"
+    port : 0
+    ID : 0
+
+# External ID server config (Ying)
+external_prop:
+    hostIP : "61.220.23.240"
+    port : "10000"
+    ID : "CAR1"
+
+# Register server
+service_prop:
+    serviceName : "controlserver" # The _id number will added in suffix, i.e. "<serviceName>_<id>"
+
+# Publish output signal (Chassis.msg)
+topic_Control:
+    topicName : "controlserver" # The _id number will added in suffix, i.e. "<topicName>_<id>"
+    publishInterval_ms : 50.0
+
+# Control signal
+control_prop:
+    enableOutput : False
+    outputPeriod_ms : 10.0
+
+# Settings for Params class under vehicle_interfaces/params.h
+generic_prop:
+    # Node name and namespace. The namespace will automatically adding prefix at node name, topic name, service name, etc..
+    namespace : "V0"
+    nodeName : "controlserver"
+
+    # Device ID, the ID will automatically formed the name of nodes and publisher topics. For instance, 
+    # the node name will be formed as "<nodeName>_<id>_node", and the publisher topic name will be formed as "<topic_name>_<id>". 
+    # Note: If the topic use to be subscriptions, then the topic name will not be formed.
+    id : 0
+
+    # ################################################################################################
+    # The rest of params will not be used. Change the following params under service.json instead.
+    # ################################################################################################
+
+    # Device information service configuration
+    devInfoService : "devinfo_0" # Service name devinfo_0
+    devInterface : "eth0" # eth0
+    devMultiNode : True # False
+
+    # QoS service configuration
+    qosService : "qos_0" # Service name qos_0
+    qosDirPath : "launch/qos"
+
+    # Safety service configuration
+    safetyService : "safety_0" # Service name safety_0
+
+    # Time sync service configuration
+    timesyncService : "timesync_0" # Service name timesync_0
+    timesyncPeriod_ms : 600000.0 # 10 minute a sync for HPC. 2 minute a sync for sensors.
+    timesyncAccuracy_ms : 2.0 # Restrict the duration of sync process time
+    timesyncWaitService : False # Wait until time synced at construction.
