@@ -160,7 +160,7 @@ public:
  * [x] Add controller
  * [x] Init chassis info (e.g. pred model)
  * [x] cvtSignal (rewrite from py_controlserver/genMotorPWM.py)
- * [x] wireless controller
+ * [x] joystick controller
  * [x] Read chassis.json
  * [x] Read joystick.json
  * [x] Connect jim id server
@@ -177,25 +177,25 @@ private:
     vehicle_interfaces::msg::ChassisInfo cInfo_;// Chassis architecture information.
     std::atomic<bool> cInfoF_;// Check valid cInfo_.
 
-    // Wireless controller.
-    FILE *joystick_;// Joystick device.
+    // Joystick controller.
     JoystickInfo jInfo_;// joystick button function configuration.
     std::atomic<bool> jInfoF_;// Check valid jInfo_.
-    vehicle_interfaces::Timer* joystickTm_;// Call _joystickCbFunc().
-    std::atomic<bool> wirelessBrakeF_;// State of wireless brake.
+    FILE *joystick_;// Joystick device.
+    std::atomic<bool> joystickF_;// Is joystick controller detected.
+    std::thread* joystickTh_;// Call _joystickTh().
+    std::atomic<bool> joystickBrakeF_;// State of joystick brake.
     std::atomic<bool> safetyOverControlF_;// State of safety over control.
-    std::atomic<bool> wirelessF_;// Is wireless controller detected.
 
     // Controller storage.
-    std::map<std::string, std::shared_ptr<vehicle_interfaces::ControlServerController> > controllerMap_;// Store registered controller.
+    std::map<std::string, std::shared_ptr<vehicle_interfaces::BaseControllerClient> > controllerMap_;// Store registered controller.
     std::map<std::string, rclcpp::executors::SingleThreadedExecutor*> controllerExecMap_;
     std::map<std::string, std::thread*> controllerThMap_;
-    std::deque<std::string> controllerIdx_;// For wireless joystick select controller by index.
+    std::deque<std::string> controllerIdx_;// The vector of controller service name.
     std::mutex controllerLock_;// Lock controllerMap_, controllerExecMap_, controllerThMap_ and controllerIdx_.
 
     // Controller switch.
-    std::atomic<size_t> selectedControllerIdx_;
-    std::string selectedControllerServiceName_;
+    std::atomic<size_t> selectedControllerIdx_;// The index of selected controller in controllerIdx_.
+    std::string selectedControllerServiceName_;// The service name of selected controller.
     vehicle_interfaces::Timer* controllerSwitchTm_;// Call _controllerSwitchCbFunc().
 
     // Safety check.
@@ -633,12 +633,23 @@ private:
         {
             if (this->controllerMap_.find(info.service_name) == this->controllerMap_.end())// service_name not in controllerMap_
             {
-                // Add controller to controllerMap_.
-                this->controllerMap_[info.service_name] = std::make_shared<vehicle_interfaces::ControlServerController>(this->params_, info);
-
-                // Convert function is required if controller msg type is ControlSteeringWheel.
                 if (info.msg_type == vehicle_interfaces::msg::ControllerInfo::MSG_TYPE_STEERING_WHEEL)
-                    this->controllerMap_[info.service_name]->setCvtFunc(std::bind(&ControlServer::_cvtControlSteeringWheelToControlChassis, this, std::placeholders::_1, std::placeholders::_2));
+                {
+                    // Add controller to controllerMap_.
+                    auto controller = std::make_shared<vehicle_interfaces::SteeringWheelControllerClient>(info);
+                    // Convert function is required if controller msg type is ControlSteeringWheel.
+                    // TODO: more convert function for PWM, RPM and ANGLE.
+                    controller->setCvtFunc(std::bind(&ControlServer::_cvtControlSteeringWheelToControlChassis, this, std::placeholders::_1, std::placeholders::_2));
+                    this->controllerMap_[info.service_name] = controller;
+                }
+                else if (info.msg_type == vehicle_interfaces::msg::ControllerInfo::MSG_TYPE_CHASSIS)
+                {
+                    // Add controller to controllerMap_.
+                    auto controller = std::make_shared<vehicle_interfaces::ChassisControllerClient>(info);
+                    this->controllerMap_[info.service_name] = controller;
+                }
+                else
+                    throw "Unknown msg_type.";
 
                 // New executor and add controller.
                 this->controllerExecMap_[info.service_name] = new rclcpp::executors::SingleThreadedExecutor();
@@ -730,7 +741,7 @@ private:
             this->controllerThMap_[serviceName]->join();
 
             // Delete thread first
-            delete this->controllerThMap_[serviceName];
+            // delete this->controllerThMap_[serviceName];
             this->controllerThMap_.erase(serviceName);
 
             // Delete executor.
@@ -813,58 +824,63 @@ private:
      */
 
     /**
-     * Timer callback function for joystick signal input.
+     * (Sub-thread) Loop function for joystick signal input.
+     * Function stops when exitF_ set to true.
      */
-    void _joystickCbFunc()
+    void _joystickTh()
     {
-        // Open joystick.
-        if (!this->wirelessF_)
+        while (!this->exitF_)
         {
-            if (this->joystick_ != nullptr)
-                fclose(this->joystick_);
-            this->joystick_ = fopen(this->jInfo_.device.c_str(), "rb+");
-            if (!this->joystick_)
+            // Open joystick.
+            if (!this->joystickF_)
             {
-                this->wirelessF_ = false;
-                RCLCPP_ERROR(this->get_logger(), "[ControlServer::_joystickCbFunc] Open %s failed.\n", this->jInfo_.device.c_str());
-                return;
+                if (this->joystick_ != nullptr)
+                    fclose(this->joystick_);
+                this->joystick_ = fopen(this->jInfo_.device.c_str(), "rb+");
+                if (!this->joystick_)
+                {
+                    this->joystickF_ = false;
+                    RCLCPP_ERROR(this->get_logger(), "[ControlServer::_joystickCbFunc] Open %s failed.\n", this->jInfo_.device.c_str());
+                    std::this_thread::sleep_for(1s);
+                    continue;
+                }
+                this->joystickF_ = true;
             }
-            this->wirelessF_ = true;
-        }
 
-        // Read joystick data.
-        js_event msg;
-        const size_t ret = fread(&msg, sizeof(js_event), 1, this->joystick_);
-        if (ret == 1)
-        {
-            printf("time: %-5d, value: %-5d, type: %-5d, number: %-5d\n", msg.time, msg.value, msg.type, msg.number);
-            if (js_event_equal(msg, this->jInfo_.brakeBtn))
-                this->wirelessBrakeF_ = true;
-            else if (js_event_equal(msg, this->jInfo_.releaseBrakeBtn))
-                this->wirelessBrakeF_ = false;
-            if (js_event_equal(msg, this->jInfo_.enableSafetyBtn))
-                this->safetyOverControlF_ = true;
-            else if (js_event_equal(msg, this->jInfo_.disableSafetyBtn))
-                this->safetyOverControlF_ = false;
-            else if (js_event_equal(msg, this->jInfo_.ascentIdxBtn))
-                this->_increaseSelectedIdx();
-            else if (js_event_equal(msg, this->jInfo_.descentIdxBtn))
-                this->_decreaseSelectedIdx();
-        }
-        else if (feof(this->joystick_))
-        {
-            this->wirelessF_ = false;
-            RCLCPP_ERROR(this->get_logger(), "[ControlServer::_joystickCbFunc] EoF.");
-        }
-        else if (ferror(this->joystick_))
-        {
-            this->wirelessF_ = false;
-            RCLCPP_ERROR(this->get_logger(), "[ControlServer::_joystickCbFunc] Error reading %s.", this->jInfo_.device.c_str());
+            // Read joystick data.
+            js_event msg;
+            const size_t ret = fread(&msg, sizeof(js_event), 1, this->joystick_);
+            if (ret == 1)
+            {
+                printf("time: %-5d, value: %-5d, type: %-5d, number: %-5d\n", msg.time, msg.value, msg.type, msg.number);
+                if (js_event_equal(msg, this->jInfo_.brakeBtn))
+                    this->joystickBrakeF_ = true;
+                else if (js_event_equal(msg, this->jInfo_.releaseBrakeBtn))
+                    this->joystickBrakeF_ = false;
+                if (js_event_equal(msg, this->jInfo_.enableSafetyBtn))
+                    this->safetyOverControlF_ = true;
+                else if (js_event_equal(msg, this->jInfo_.disableSafetyBtn))
+                    this->safetyOverControlF_ = false;
+                else if (js_event_equal(msg, this->jInfo_.ascentIdxBtn))
+                    this->_increaseSelectedIdx();
+                else if (js_event_equal(msg, this->jInfo_.descentIdxBtn))
+                    this->_decreaseSelectedIdx();
+            }
+            else if (feof(this->joystick_))
+            {
+                this->joystickF_ = false;
+                RCLCPP_ERROR(this->get_logger(), "[ControlServer::_joystickCbFunc] EoF.");
+            }
+            else if (ferror(this->joystick_))
+            {
+                this->joystickF_ = false;
+                RCLCPP_ERROR(this->get_logger(), "[ControlServer::_joystickCbFunc] Error reading %s.", this->jInfo_.device.c_str());
+            }
         }
     }
 
     /**
-     * Timer callback function for safety check.
+     * (Sub-thread) Timer callback function for safety check.
      */
     void _safetyCbFunc()
     {
@@ -887,7 +903,7 @@ private:
     }
 
     /**
-     * Timer callback function for idclient.
+     * (Sub-thread) Timer callback function for idclient.
      */
     void _idclientCbFunc()
     {
@@ -915,7 +931,7 @@ private:
     }
 
     /**
-     * Timer callback function for publisher.
+     * (Sub-thread) Timer callback function for publisher.
      */
     void _publishCbFunc()
     {
@@ -924,17 +940,17 @@ private:
     }
 
     /**
-     * Timer callback function for controller switch.
+     * (Sub-thread) Timer callback function for controller switch.
      */
     void _controllerSwitchCbFunc()
     {
         std::unique_lock<std::mutex> controllerLocker(this->controllerLock_, std::defer_lock);
 
         // Check joystick and valid selected controller.
-        if (!this->wirelessF_ || this->wirelessBrakeF_ || !this->_checkSelectedController())
+        if (!this->joystickF_ || this->joystickBrakeF_ || !this->_checkSelectedController())
         {
             this->_brkSignal();
-            RCLCPP_WARN(this->get_logger(), "[ControlServer::_controllerSwitchCbFunc] Wireless brake or controller index error.");
+            RCLCPP_WARN(this->get_logger(), "[ControlServer::_controllerSwitchCbFunc] Joystick brake or controller index error.");
             return;
         }
 
@@ -1043,8 +1059,10 @@ private:
     void _regServerCallback(const std::shared_ptr<vehicle_interfaces::srv::ControllerInfoReg::Request> request, 
                             std::shared_ptr<vehicle_interfaces::srv::ControllerInfoReg::Response> response)
     {
+        RCLCPP_INFO(this->get_logger(), "[ControlServer::_regServerCallback]");
         if (this->exitF_)
         {
+            RCLCPP_INFO(this->get_logger(), "[ControlServer::_regServerCallback] exit flag set.");
             response->response = false;
             return;
         }
@@ -1055,7 +1073,10 @@ private:
             response->response = true;
         }
         else
+        {
+            RCLCPP_WARN(this->get_logger(), "[ControlServer::_regServerCallback] Add %s controller failed.", request->request.service_name.c_str());
             response->response = false;
+        }
     }
 
     /** Callback function for request controller information. */
@@ -1090,13 +1111,13 @@ public:
         params_(params), 
         // Chassis info init.
         cInfoF_(false), 
-        // Wireless controller init.
+        // Joystick controller init.
         joystick_(nullptr), 
         jInfoF_(false), 
-        joystickTm_(nullptr), 
-        wirelessBrakeF_(false), 
+        joystickTh_(nullptr), 
+        joystickBrakeF_(false), 
         safetyOverControlF_(false), 
-        wirelessF_(false), 
+        joystickF_(false), 
         // Controller switch init.
         selectedControllerIdx_(-1), 
         selectedControllerServiceName_(""), 
@@ -1121,50 +1142,59 @@ public:
         try
         {
             // Check ChassisInfo.
+            RCLCPP_INFO(this->get_logger(), "[ControlServer] Loading chassis file: %s", params->chassisFilePath.c_str());
             if (ReadChassisInfo(params->chassisFilePath, this->cInfo_))
             {
                 PrintChassisInfo(this->cInfo_);
                 this->_initMotorMapping(this->cInfo_);
                 this->_initChassisInfo(this->cInfo_);
                 this->cInfoF_ = true;
+                RCLCPP_INFO(this->get_logger(), "[ControlServer] Chassis initialized.");
             }
             else
             {
                 RCLCPP_ERROR(this->get_logger(), "[ControlServer] Failed to read chassis file: %s", params->chassisFilePath.c_str());
                 return;
             }
-
+// DEBUG
+goto INIT_SERVICE_TAG;
+INIT_JOYSTICK_TAG:
             // Check JoystickInfo.
+            RCLCPP_INFO(this->get_logger(), "[ControlServer] Loading joystick file: %s", params->joystickFilePath.c_str());
             if (ReadJoystickInfo(params->joystickFilePath, this->jInfo_))
             {
                 this->jInfoF_ = true;
-                this->joystickTm_ = new vehicle_interfaces::Timer(1000, std::bind(&ControlServer::_joystickCbFunc, this));
-                this->joystickTm_->start();
+                this->joystickTh_ = new std::thread(&ControlServer::_joystickTh, this);
+                RCLCPP_INFO(this->get_logger(), "[ControlServer] Joystick initialized.");
             }
             else
             {
                 RCLCPP_ERROR(this->get_logger(), "[ControlServer] Failed to read joystick file: %s", params->joystickFilePath.c_str());
                 return;
             }
-
-            // Create JimIDClient.
+INIT_IDCLIENT_TAG:
+            // Create idclient timer.
+            RCLCPP_INFO(this->get_logger(), "[ControlServer] Initializing idclient timer...");
             this->idclientTm_ = new vehicle_interfaces::Timer(1000, std::bind(&ControlServer::_idclientCbFunc, this));
             this->idclientTm_->start();
-
-            // Init safety.
+INIT_SWITCH_TAG:
+            // Create safety timer.
+            RCLCPP_INFO(this->get_logger(), "[ControlServer] Initializing safety timer...");
             this->emPs_.fill(1);
             this->safetyTm_ = new vehicle_interfaces::Timer(params->publishInterval_ms, std::bind(&ControlServer::_safetyCbFunc, this));
             this->safetyTm_->start();
-
-            // Controller switch.
+INIT_SAFETY_TAG:
+            // Create controller switch timer.
+            RCLCPP_INFO(this->get_logger(), "[ControlServer] Initializing controller switch timer...");
             this->controllerSwitchTm_ = new vehicle_interfaces::Timer(params->outputPeriod_ms, std::bind(&ControlServer::_controllerSwitchCbFunc, this));
             this->controllerSwitchTm_->start();
-
-            // Create publisher.
+INIT_PUBLISH_TAG:
+            // Create publisher timer.
+            RCLCPP_INFO(this->get_logger(), "[ControlServer] Initializing publisher timer...");
             this->publisher_ = this->create_publisher<vehicle_interfaces::msg::Chassis>(params->topicName, 10);
             this->publishTm_ = new vehicle_interfaces::Timer(params->publishInterval_ms, std::bind(&ControlServer::_publishCbFunc, this));
             this->publishTm_->start();
-
+INIT_SERVICE_TAG:
             // Create register and request services.
             this->regServer_ = this->create_service<vehicle_interfaces::srv::ControllerInfoReg>(params->serviceName + "_Reg", 
                 std::bind(&ControlServer::_regServerCallback, this, std::placeholders::_1, std::placeholders::_2));
@@ -1230,10 +1260,10 @@ public:
             delete this->idclient_;
         }
         // Destroy joystick timer.
-        if (this->joystickTm_ != nullptr)
+        if (this->joystickTh_ != nullptr)
         {
-            this->joystickTm_->destroy();
-            delete this->joystickTm_;
+            this->joystickTh_->join();
+            delete this->joystickTh_;
         }
         // Delete joystick.
         if (this->joystick_ != nullptr)
