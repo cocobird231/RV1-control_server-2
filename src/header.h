@@ -19,6 +19,7 @@
 #include "rclcpp/rclcpp.hpp"
 #include "vehicle_interfaces/control.h"
 #include "vehicle_interfaces/utils.h"
+#include "vehicle_interfaces/msg_json.h"
 #include "vehicle_interfaces/msg/chassis_info.hpp"
 #include "vehicle_interfaces/msg/control_chassis.hpp"
 #include "vehicle_interfaces/msg/controller_info.hpp"
@@ -173,7 +174,7 @@ public:
 class ControlServer : public vehicle_interfaces::VehicleServiceNode
 {
 private:
-    std::shared_ptr<Params> params_;// ControlServer parameters.
+    const std::shared_ptr<Params> params_;// ControlServer parameters.
     vehicle_interfaces::msg::ChassisInfo cInfo_;// Chassis architecture information.
     std::atomic<bool> cInfoF_;// Check valid cInfo_.
 
@@ -271,7 +272,21 @@ private:
         return *ptr;
     }
 
-
+    /**
+     * Set header for published message.
+     * @param[out] msg Header message.
+     */
+    void _getHeader(vehicle_interfaces::msg::Header& msg)
+    {
+        msg.priority = vehicle_interfaces::msg::Header::PRIORITY_CONTROL;
+        msg.device_type = vehicle_interfaces::msg::Header::DEVTYPE_NONE;
+        msg.device_id = this->params_->nodeName;
+        msg.frame_id = this->publishFrameId_++;
+        msg.stamp_type = this->getTimestampType();
+        msg.stamp = this->getTimestamp();
+        msg.stamp_offset = this->getCorrectDuration().nanoseconds();
+        msg.ref_publish_time_ms = this->params_->publishInterval_ms;
+    }
 
     /**
      * ================================================================
@@ -935,8 +950,7 @@ private:
      */
     void _publishCbFunc()
     {
-        std::lock_guard<std::mutex> locker(this->publishMsgLock_);
-        this->publisher_->publish(this->publishMsg_);
+        this->publisher_->publish(this->_safeCall(&this->publishMsg_, this->publishMsgLock_));
     }
 
     /**
@@ -1028,23 +1042,10 @@ private:
                                 this->idclient_->sendSteeringMotorSignal(msg.steering_motor);
 
         // Filled publish message.
-        std::unique_lock<std::mutex> publishMsgLocker(this->publishMsgLock_, std::defer_lock);
-        publishMsgLocker.lock();
-        this->publishMsg_.header.priority = vehicle_interfaces::msg::Header::PRIORITY_CONTROL;
-        this->publishMsg_.header.device_type = vehicle_interfaces::msg::Header::DEVTYPE_NONE;
-        this->publishMsg_.header.device_id = this->params_->nodeName;
-        this->publishMsg_.header.frame_id = this->publishFrameId_++;
-        this->publishMsg_.header.stamp_type = this->getTimestampType();
-        this->publishMsg_.header.stamp = this->getTimestamp();
-        this->publishMsg_.header.stamp_offset = this->getCorrectDuration().nanoseconds();
-        this->publishMsg_.header.ref_publish_time_ms = this->params_->publishInterval_ms;
-
-        this->publishMsg_.unit_type = vehicle_interfaces::msg::Chassis::UNIT_PWM;
-        this->publishMsg_.drive_motor = msg.drive_motor;
-        this->publishMsg_.steering_motor = msg.steering_motor;
-        this->publishMsg_.parking_signal = msg.parking_signal;
-        this->publishMsg_.controller_name = controllerServiceName;
-        publishMsgLocker.unlock();
+        auto cvt = vehicle_interfaces::msg_to_msg::Chassis::convert(msg);
+        this->_getHeader(cvt.header);
+        cvt.controller_name = controllerServiceName;
+        this->_safeSave(&this->publishMsg_, cvt, this->publishMsgLock_);
     }
 
 
@@ -1157,7 +1158,7 @@ public:
                 return;
             }
 // DEBUG
-goto INIT_SERVICE_TAG;
+goto INIT_PUBLISH_TAG;
 INIT_JOYSTICK_TAG:
             // Check JoystickInfo.
             RCLCPP_INFO(this->get_logger(), "[ControlServer] Loading joystick file: %s", params->joystickFilePath.c_str());
@@ -1177,13 +1178,13 @@ INIT_IDCLIENT_TAG:
             RCLCPP_INFO(this->get_logger(), "[ControlServer] Initializing idclient timer...");
             this->idclientTm_ = new vehicle_interfaces::Timer(1000, std::bind(&ControlServer::_idclientCbFunc, this));
             this->idclientTm_->start();
-INIT_SWITCH_TAG:
+INIT_SAFETY_TAG:
             // Create safety timer.
             RCLCPP_INFO(this->get_logger(), "[ControlServer] Initializing safety timer...");
             this->emPs_.fill(1);
             this->safetyTm_ = new vehicle_interfaces::Timer(params->publishInterval_ms, std::bind(&ControlServer::_safetyCbFunc, this));
             this->safetyTm_->start();
-INIT_SAFETY_TAG:
+INIT_SWITCH_TAG:
             // Create controller switch timer.
             RCLCPP_INFO(this->get_logger(), "[ControlServer] Initializing controller switch timer...");
             this->controllerSwitchTm_ = new vehicle_interfaces::Timer(params->outputPeriod_ms, std::bind(&ControlServer::_controllerSwitchCbFunc, this));
