@@ -156,6 +156,7 @@ public:
 
 /**
  * TODO:
+ * Feature:
  * [x] Control reg server
  * [x] Control req server
  * [x] Add controller
@@ -170,6 +171,17 @@ public:
  * [x] Publisher thread for chassis signal
  * [ ] Higher priority interruption
  * [x] Dynamic controller removal
+ * 
+ * Functionality test:
+ * [x] Test control reg server
+ * [ ] Test control req server
+ * [x] Test joystick controller
+ * [ ] Test idclient
+ * [x] Test safety
+ * [x] Test controller switch
+ * [x] Test publisher
+ * [/] Test dynamic controller addition and removal
+ * [ ] Test higher priority interruption
  */
 class ControlServer : public vehicle_interfaces::VehicleServiceNode
 {
@@ -418,15 +430,15 @@ private:
      * @param[in] rpms input RPM vector.
      * @return PWM vector if predict successfully. Otherwise, %n elements of 0 which %n determined by vehicle_type under cInfo_.
      */
-    std::vector<float> _driveMotorRPMToPWM(const std::vector<float>& rpms)
+    std::vector<double> _driveMotorRPMToPWM(const std::vector<double>& rpms)
     {
         if (!this->driveMotorPredF_)
-            return std::vector<float>(this->cInfo_.vehicle_type, 0);
+            return std::vector<double>(this->cInfo_.vehicle_type, 0);
 
         if (this->driveMotorPred_.size() != rpms.size())
-            return std::vector<float>(this->cInfo_.vehicle_type, 0);
+            return std::vector<double>(this->cInfo_.vehicle_type, 0);
 
-        std::vector<float> ret(rpms.size(), 0);
+        std::vector<double> ret(rpms.size(), 0);
 
         for (int i = 0; i < rpms.size(); i++)
         {
@@ -449,11 +461,11 @@ private:
             return false;
         int steeringWheel = src.steering;
         int steeringWheelAbs = abs(src.steering);
-        float refSpeed = vehicle_interfaces::LinearMapping1d(src.pedal_throttle, 0, 255, 0, 120);
+        double refSpeed = vehicle_interfaces::LinearMapping1d(src.pedal_throttle, 0, 255, 0, 120);
         dst.drive_motor = { 0, 0, 0, 0 };
         dst.steering_motor = { 0, 0, 0, 0 };
         dst.parking_signal = { 0, 0, 0, 0 };
-        std::vector<float> motorDirectionList(4, 1);
+        std::vector<double> motorDirectionList(4, 1);
 
         if (steeringWheelAbs < this->STEERINGWHEEL_TOLERANCE)
             steeringWheel = 0;
@@ -473,11 +485,11 @@ private:
                 motorDirectionList = { -1, -1, -1, -1 };
         }
 
-        float innerAng = 0;
-        float outerAng = 0;
+        double innerAng = 0;
+        double outerAng = 0;
 
-        float innerVelo = 0;
-        float outerVelo = 0;
+        double innerVelo = 0;
+        double outerVelo = 0;
 
         if (src.func_0 == 3)// Zero turn
         {
@@ -501,8 +513,8 @@ private:
             // Speed
             innerVelo = refSpeed * std::sqrt(std::pow(innerRadius, 2) + std::pow(this->CHASSIS_CAR_LENGTH, 2)) / steeringRadius;
             outerVelo = refSpeed * std::sqrt(std::pow(outerRadius, 2) + std::pow(this->CHASSIS_CAR_LENGTH, 2)) / steeringRadius;
-            float rearInnerVelo = refSpeed * innerRadius / steeringRadius;
-            float rearOuterVelo = refSpeed * outerRadius / steeringRadius;
+            double rearInnerVelo = refSpeed * innerRadius / steeringRadius;
+            double rearOuterVelo = refSpeed * outerRadius / steeringRadius;
             // Assign lists
             if (steeringWheel > 0)// Turn right, inner: 11
             {
@@ -580,7 +592,7 @@ private:
         else if (src.func_0 == 4)// parallel
         {
             double steeringWheelAbsCorrection = vehicle_interfaces::GammaCorrection(steeringWheelAbs, 0.2, 0, 32768);
-            float steeringAngle = vehicle_interfaces::LinearMapping1d(steeringWheelAbsCorrection, 0, 32768, this->CHASSIS_MIN_WHEEL_STEER_ANGLE, this->CHASSIS_MAX_WHEEL_STEER_ANGLE);
+            double steeringAngle = vehicle_interfaces::LinearMapping1d(steeringWheelAbsCorrection, 0, 32768, this->CHASSIS_MIN_WHEEL_STEER_ANGLE, this->CHASSIS_MAX_WHEEL_STEER_ANGLE);
             // Speed
             dst.drive_motor = this->_driveMotorRPMToPWM({ refSpeed, refSpeed, refSpeed, refSpeed });
             // Assign lists
@@ -906,6 +918,7 @@ private:
             {
                 this->_safeSave(&this->emPs_, tmp, this->emPsLock_);
                 this->safetyF_ = true;
+                return;
             }
             this->safetyF_ = false;
             RCLCPP_ERROR(this->get_logger(), "[ControlServer::_safetyCbFunc] Get emergency error.");
@@ -913,7 +926,7 @@ private:
         catch (...)
         {
             this->safetyF_ = false;
-            RCLCPP_ERROR(this->get_logger(), "[ControlServer::_safetyCbFunc] Get emergency error.");
+            RCLCPP_ERROR(this->get_logger(), "[ControlServer::_safetyCbFunc] Caught unexpected error.");
         }
     }
 
@@ -984,10 +997,17 @@ private:
          */
 
         // Check chassis signal timeout.
-        if (!isSignalValidF || std::chrono::high_resolution_clock::now() - timestamp > std::chrono::duration<float, std::milli>(info.period_ms * 2))
+        if (!isSignalValidF)
         {
             this->_brkSignal();
             RCLCPP_WARN(this->get_logger(), "[ControlServer::_controllerSwitchCbFunc] Invalid chassis signal.");
+            return;
+        }
+
+        if (std::chrono::high_resolution_clock::now() - timestamp > std::chrono::duration<float, std::milli>(info.period_ms * 2))
+        {
+            this->_brkSignal();
+            RCLCPP_WARN(this->get_logger(), "[ControlServer::_controllerSwitchCbFunc] Chassis signal timeout.");
             return;
         }
 
@@ -999,30 +1019,35 @@ private:
             return;
         }
 
-        // Safety (8-direction emergency detection).
+        // Safety service check.
         if (!this->safetyF_)
         {
             this->_brkSignal();
-            RCLCPP_WARN(this->get_logger(), "[ControlServer::_controllerSwitchCbFunc] Get emergency error.");
+            RCLCPP_WARN(this->get_logger(), "[ControlServer::_controllerSwitchCbFunc] Safety service error.");
             return;
         }
 
-        std::array<float, 8> emPArr = this->_safeCall(&this->emPs_, this->emPsLock_);
-        float driveSum = 0;
-        for (const auto& i : msg.drive_motor)
-            driveSum += i;
-
-        if (emPArr[0] > 0.7 && driveSum > 0)// Forward emergency.
+        // Safety over control (8-direction emergency detection).
+        if (this->safetyOverControlF_)
         {
-            this->_brkSignal();
-            return;
-        }
-        else if (emPArr[1] > 0.7 && driveSum < 0)// Backward emergency.
-        {
-            this->_brkSignal();
-            return;
-        }
+            std::array<float, 8> emPArr = this->_safeCall(&this->emPs_, this->emPsLock_);
+            float driveSum = 0;
+            for (const auto& i : msg.drive_motor)
+                driveSum += i;
 
+            if (emPArr[0] > 0.7 && driveSum > 0)// Forward emergency.
+            {
+                this->_brkSignal();
+                RCLCPP_WARN(this->get_logger(), "[ControlServer::_controllerSwitchCbFunc] (forward) Safety over control.");
+                return;
+            }
+            else if (emPArr[1] > 0.7 && driveSum < 0)// Backward emergency.
+            {
+                this->_brkSignal();
+                RCLCPP_WARN(this->get_logger(), "[ControlServer::_controllerSwitchCbFunc] (backward) Safety over control.");
+                return;
+            }
+        }
 
         /**
          * Chassis signal and safety check passed. 
@@ -1157,8 +1182,6 @@ public:
                 RCLCPP_ERROR(this->get_logger(), "[ControlServer] Failed to read chassis file: %s", params->chassisFilePath.c_str());
                 return;
             }
-// DEBUG
-goto INIT_PUBLISH_TAG;
 INIT_JOYSTICK_TAG:
             // Check JoystickInfo.
             RCLCPP_INFO(this->get_logger(), "[ControlServer] Loading joystick file: %s", params->joystickFilePath.c_str());
@@ -1173,6 +1196,8 @@ INIT_JOYSTICK_TAG:
                 RCLCPP_ERROR(this->get_logger(), "[ControlServer] Failed to read joystick file: %s", params->joystickFilePath.c_str());
                 return;
             }
+// DEBUG
+goto INIT_SAFETY_TAG;
 INIT_IDCLIENT_TAG:
             // Create idclient timer.
             RCLCPP_INFO(this->get_logger(), "[ControlServer] Initializing idclient timer...");

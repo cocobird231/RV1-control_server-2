@@ -281,7 +281,7 @@ public:
      * @param[in] prk: The drive motor parking signal vector.
      * @return true if send success. Otherwise, return false.
      */
-    bool sendDriveMotorSignal(std::vector<float> vec, std::vector<bool> prk)
+    bool sendDriveMotorSignal(std::vector<double> vec, std::vector<bool> prk)
     {
         if (!this->isConnF_ || vec.size() != prk.size() || vec.size() != this->prop_.driveMotorIdVec.size())
             return false;
@@ -308,7 +308,7 @@ public:
      * @param[in] vec: The steering motor signal vector, which element is the distance of the motor.
      * @return true if send success. Otherwise, return false.
      */
-    bool sendSteeringMotorSignal(std::vector<float> vec)
+    bool sendSteeringMotorSignal(std::vector<double> vec)
     {
         if (!this->isConnF_ || vec.size() != this->prop_.steeringMotorIdVec.size())
             return false;
