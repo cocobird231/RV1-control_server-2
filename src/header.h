@@ -867,7 +867,7 @@ private:
                 if (!this->joystick_)
                 {
                     this->joystickF_ = false;
-                    RCLCPP_ERROR(this->get_logger(), "[ControlServer::_joystickCbFunc] Open %s failed.\n", this->jInfo_.device.c_str());
+                    RCLCPP_ERROR(this->get_logger(), "[ControlServer::_joystickTh] Open %s failed.\n", this->jInfo_.device.c_str());
                     std::this_thread::sleep_for(1s);
                     continue;
                 }
@@ -879,29 +879,47 @@ private:
             const size_t ret = fread(&msg, sizeof(js_event), 1, this->joystick_);
             if (ret == 1)
             {
-                printf("time: %-5d, value: %-5d, type: %-5d, number: %-5d\n", msg.time, msg.value, msg.type, msg.number);
+                // printf("time: %-5d, value: %-5d, type: %-5d, number: %-5d\n", msg.time, msg.value, msg.type, msg.number);
                 if (js_event_equal(msg, this->jInfo_.brakeBtn))
+                {
                     this->joystickBrakeF_ = true;
+                    RCLCPP_INFO(this->get_logger(), "[ControlServer::_joystickTh] Brake button pressed.");
+                }
                 else if (js_event_equal(msg, this->jInfo_.releaseBrakeBtn))
+                {
                     this->joystickBrakeF_ = false;
+                    RCLCPP_INFO(this->get_logger(), "[ControlServer::_joystickTh] Release brake button pressed.");
+                }
                 if (js_event_equal(msg, this->jInfo_.enableSafetyBtn))
+                {
                     this->safetyOverControlF_ = true;
+                    RCLCPP_INFO(this->get_logger(), "[ControlServer::_joystickTh] Enable safety button pressed.");
+                }
                 else if (js_event_equal(msg, this->jInfo_.disableSafetyBtn))
+                {
                     this->safetyOverControlF_ = false;
+                    RCLCPP_INFO(this->get_logger(), "[ControlServer::_joystickTh] Disable safety button pressed.");
+                }
                 else if (js_event_equal(msg, this->jInfo_.ascentIdxBtn))
+                {
                     this->_increaseSelectedIdx();
+                    RCLCPP_INFO(this->get_logger(), "[ControlServer::_joystickTh] Ascent index button pressed.");
+                }
                 else if (js_event_equal(msg, this->jInfo_.descentIdxBtn))
+                {
                     this->_decreaseSelectedIdx();
+                    RCLCPP_INFO(this->get_logger(), "[ControlServer::_joystickTh] Descent index button pressed.");
+                }
             }
             else if (feof(this->joystick_))
             {
                 this->joystickF_ = false;
-                RCLCPP_ERROR(this->get_logger(), "[ControlServer::_joystickCbFunc] EoF.");
+                RCLCPP_ERROR(this->get_logger(), "[ControlServer::_joystickTh] EoF.");
             }
             else if (ferror(this->joystick_))
             {
                 this->joystickF_ = false;
-                RCLCPP_ERROR(this->get_logger(), "[ControlServer::_joystickCbFunc] Error reading %s.", this->jInfo_.device.c_str());
+                RCLCPP_ERROR(this->get_logger(), "[ControlServer::_joystickTh] Error reading %s.", this->jInfo_.device.c_str());
             }
         }
     }
