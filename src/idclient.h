@@ -39,26 +39,39 @@ private:
 public:
     SocketClient(const SocketProp& prop) : sockFd_(-1), isConnF_(false)
     {
-        this->prop_ = prop;
-        // Open socket.
-        this->sockFd_ = socket(PF_INET, SOCK_STREAM, this->prop_.protocol);
-        // set socket timeout to 500ms
-        struct timeval timeout;
-        timeout.tv_sec = 0;
-        timeout.tv_usec = 500000;
-        setsockopt(this->sockFd_, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout));
-        setsockopt(this->sockFd_, SOL_SOCKET, SO_SNDTIMEO, (char *)&timeout, sizeof(timeout));
-
-        if (this->sockFd_ == -1)
-            throw "[SocketClient] Open socket error.";
-        // Filled struct.
-        memset(&this->stSockAddr_, 0, sizeof(struct sockaddr_in));
-        this->stSockAddr_.sin_family = AF_INET;
-        this->stSockAddr_.sin_port = htons(this->prop_.port);
-        if (inet_pton(AF_INET, this->prop_.host, &this->stSockAddr_.sin_addr) <= 0)
+        try
         {
-            close(this->sockFd_);
-            throw "[SocketClient] Fill struct error.";
+            this->prop_ = prop;
+            // Open socket.
+            this->sockFd_ = socket(PF_INET, SOCK_STREAM, this->prop_.protocol);
+            // set socket timeout to 500ms
+            struct timeval timeout;
+            timeout.tv_sec = 0;
+            timeout.tv_usec = 500000;
+            setsockopt(this->sockFd_, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout));
+            setsockopt(this->sockFd_, SOL_SOCKET, SO_SNDTIMEO, (char *)&timeout, sizeof(timeout));
+
+            if (this->sockFd_ == -1)
+                throw "[SocketClient] Open socket error.";
+            // Filled struct.
+            memset(&this->stSockAddr_, 0, sizeof(struct sockaddr_in));
+            this->stSockAddr_.sin_family = AF_INET;
+            this->stSockAddr_.sin_port = htons(this->prop_.port);
+            if (inet_pton(AF_INET, this->prop_.host, &this->stSockAddr_.sin_addr) <= 0)
+            {
+                close(this->sockFd_);
+                throw "[SocketClient] Fill struct error.";
+            }
+        }
+        catch (const char* msg)
+        {
+            printf("[SocketClient] Caught exception: %s\n", msg);
+            throw msg;
+        }
+        catch (...)
+        {
+            printf("[SocketClient] Caught Unknow exception.\n");
+            throw "[SocketClient] Unknow exception.";
         }
     }
 
@@ -159,8 +172,9 @@ struct JimIDClientProp
 class JimIDClient
 {
 private:
-    SocketClient *aliveSock_;
-    SocketClient *dataSock_;
+    SocketClient *testSock_;// Port 10002.
+    SocketClient *aliveSock_;// Por 10003.
+    SocketClient *dataSock_;// Port 10004.
 
     std::atomic<bool> isConnF_;
 
@@ -206,7 +220,7 @@ private:
             this->aliveSock_->send(buf, tmp.size() + 4);
             delete buf;
             this->_logger("[JimIDClient::_sendAliveTh] End send alive signal.\n");
-            std::this_thread::sleep_for(std::chrono::seconds(1));
+            std::this_thread::sleep_for(std::chrono::seconds(3));
         }
     }
 
@@ -215,6 +229,7 @@ private:
         while (!this->exitF_)
         {
             this->_logger("[JimIDClient::_flushRecvBufferTh] Start flush recv buffer.\n");
+            this->testSock_->flushRecvBuffer();
             this->aliveSock_->flushRecvBuffer();
             this->dataSock_->flushRecvBuffer();
             this->_logger("[JimIDClient::_flushRecvBufferTh] End flush recv buffer.\n");
@@ -225,6 +240,7 @@ private:
 public:
     JimIDClient(const JimIDClientProp& prop) : 
         prop_(prop), 
+        testSock_(nullptr), 
         aliveSock_(nullptr), 
         dataSock_(nullptr), 
         isConnF_(false), 
@@ -245,18 +261,20 @@ public:
         if (this->isConnF_ || this->exitF_)
             return false;
         this->_logger("[JimIDClient::connect] Create socket.\n");
+        this->testSock_ = new SocketClient({ this->prop_.host, 10002, IPPROTO_TCP });
         this->aliveSock_ = new SocketClient({ this->prop_.host, 10003, IPPROTO_TCP });
         this->dataSock_ = new SocketClient({ this->prop_.host, 10004, IPPROTO_TCP });
 
         this->_logger("[JimIDClient::connect] Connect to server.\n");
-        if (this->aliveSock_->connect() != SocketClientStatus::ERROR && 
+        if (this->testSock_->connect() != SocketClientStatus::ERROR && 
+            this->aliveSock_->connect() != SocketClientStatus::ERROR && 
             this->dataSock_->connect() != SocketClientStatus::ERROR)
         {
             std::vector<unsigned char> tmp = { 0x69, 0x74, 0x72, 0x69, 0x00, 0x03, 0x01, 0x00, 0x00, this->prop_.controllerId };
             auto buf = this->_packMsg(tmp.data(), tmp.size());
             this->_logger("[JimIDClient::connect] Send controller id.\n");
-            if (this->aliveSock_->send(buf, tmp.size() + 4) == SocketClientStatus::SUCCESS && 
-                this->dataSock_->send(buf, tmp.size() + 4) == SocketClientStatus::SUCCESS)
+            if (this->testSock_->send(buf, tmp.size() + 4) == SocketClientStatus::SUCCESS && 
+                this->aliveSock_->send(buf, tmp.size() + 4) == SocketClientStatus::SUCCESS)
             {
                 // Start alive thread.
                 this->_logger("[JimIDClient::connect] Start alive thread.\n");
@@ -267,10 +285,16 @@ public:
             }
             else
             {
-                this->_logger("[JimIDClient::connect] Start flush recv buffer thread.\n");
+                this->_logger("[JimIDClient::connect] Send controller id error.\n");
                 this->isConnF_ = false;
             }
             delete buf;
+        }
+        else
+        {
+            delete this->testSock_;
+            delete this->aliveSock_;
+            delete this->dataSock_;
         }
         return this->isConnF_;
     }
@@ -296,7 +320,7 @@ public:
                                                 static_cast<unsigned char>(abs(vec[i])), 
                                                 this->prop_.driveMotorIdVec[i] };
             auto buf = this->_packMsg(tmp.data(), tmp.size());
-            ret &= this->dataSock_->send(buf, tmp.size() + 4);
+            ret &= this->dataSock_->send(buf, tmp.size() + 4) == SocketClientStatus::SUCCESS;
             this->_logger("[JimIDClient::sendDriveMotorSignal] Send drive motor signal: %d\n", this->prop_.driveMotorIdVec[i]);
             delete buf;
         }
@@ -322,7 +346,7 @@ public:
                                                 static_cast<unsigned char>((int)(vec[i]) % 256), 
                                                 this->prop_.steeringMotorIdVec[i] };
             auto buf = this->_packMsg(tmp.data(), tmp.size());
-            ret &= this->dataSock_->send(buf, tmp.size() + 4);
+            ret &= this->dataSock_->send(buf, tmp.size() + 4) == SocketClientStatus::SUCCESS;
             this->_logger("[JimIDClient::sendSteeringMotorSignal] Send steering motor signal: %d\n", this->prop_.steeringMotorIdVec[i]);
             delete buf;
         }
@@ -357,11 +381,21 @@ public:
         this->_logger("[JimIDClient::close] Join flush recv buffer thread done.\n");
 
         this->_logger("[JimIDClient::close] Disconnecting socket.\n");
-        this->aliveSock_->disconnect();
-        this->dataSock_->disconnect();
-        this->_logger("[JimIDClient::close] Disconnecting socket done.\n");
-        delete this->aliveSock_;
-        delete this->dataSock_;
-        this->_logger("[JimIDClient::close] Delete socket.\n");
+        if (this->testSock_ != nullptr)
+        {
+            this->testSock_->disconnect();
+            delete this->testSock_;
+        }
+        if (this->aliveSock_ != nullptr)
+        {
+            this->aliveSock_->disconnect();
+            delete this->aliveSock_;
+        }
+        if (this->dataSock_ != nullptr)
+        {
+            this->dataSock_->disconnect();
+            delete this->dataSock_;
+        }
+        this->_logger("[JimIDClient::close] Socket deleted.\n");
     }
 };

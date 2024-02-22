@@ -26,10 +26,10 @@ topic_Control:
     topicName : "controlserver" # The _id number will added in suffix, i.e. "<topicName>_<id>"
     publishInterval_ms : 50.0
 
-# Control signal
+# Control signal for server behavior
 control_prop:
     enableOutput : False
-    outputPeriod_ms : 10.0
+    outputPeriod_ms : 50.0
 
 # Settings for Params class under vehicle_interfaces/params.h
 generic_prop:

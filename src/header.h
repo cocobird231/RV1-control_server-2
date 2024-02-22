@@ -176,7 +176,7 @@ public:
  * [x] Test control reg server
  * [ ] Test control req server
  * [x] Test joystick controller
- * [ ] Test idclient
+ * [x] Test idclient
  * [x] Test safety
  * [x] Test controller switch
  * [x] Test publisher
@@ -943,17 +943,28 @@ private:
             prop.driveMotorIdVec = { 11, 12, 13, 14 };
             prop.steeringMotorIdVec = { 41, 42, 43, 44 };
             prop.verbose = false;
-            if (this->idclient_ == nullptr)
+            try
             {
-                this->idclient_ = new JimIDClient(prop);
-                this->idclientF_ = this->idclient_->connect();
+                if (this->idclient_ == nullptr)
+                {
+                    this->idclient_ = new JimIDClient(prop);
+                    this->idclientF_ = this->idclient_->connect();
+                }
+                else
+                {
+                    this->idclient_->close();
+                    delete this->idclient_;
+                    this->idclient_ = new JimIDClient(prop);
+                    this->idclientF_ = this->idclient_->connect();
+                }
             }
-            else
+            catch (...)
             {
-                this->idclient_->close();
-                delete this->idclient_;
-                this->idclient_ = new JimIDClient(prop);
-                this->idclientF_ = this->idclient_->connect();
+                if (this->idclient_ != nullptr)
+                    delete this->idclient_;
+                this->idclient_ = nullptr;
+                this->idclientF_ = false;
+                RCLCPP_ERROR(this->get_logger(), "[ControlServer::_idclientCbFunc] Caught unexpected error.");
             }
         }
     }
@@ -1197,7 +1208,7 @@ INIT_JOYSTICK_TAG:
                 return;
             }
 // DEBUG
-goto INIT_SAFETY_TAG;
+goto INIT_IDCLIENT_TAG;
 INIT_IDCLIENT_TAG:
             // Create idclient timer.
             RCLCPP_INFO(this->get_logger(), "[ControlServer] Initializing idclient timer...");
@@ -1207,7 +1218,7 @@ INIT_SAFETY_TAG:
             // Create safety timer.
             RCLCPP_INFO(this->get_logger(), "[ControlServer] Initializing safety timer...");
             this->emPs_.fill(1);
-            this->safetyTm_ = new vehicle_interfaces::Timer(params->publishInterval_ms, std::bind(&ControlServer::_safetyCbFunc, this));
+            this->safetyTm_ = new vehicle_interfaces::Timer(50, std::bind(&ControlServer::_safetyCbFunc, this));
             this->safetyTm_->start();
 INIT_SWITCH_TAG:
             // Create controller switch timer.
