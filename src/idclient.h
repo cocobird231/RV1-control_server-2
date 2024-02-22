@@ -23,6 +23,7 @@ struct SocketProp
     const char* host;
     int port;
     int protocol;// IPPROTO_TCP or IPPROTO_UDP
+    bool verbose;
 };
 
 enum SocketClientStatus { SUCCESS, ALREADY_CONNECTED, ALREADY_DISCONNECTED, ERROR };
@@ -35,9 +36,25 @@ private:
     struct sockaddr_in stSockAddr_;
     std::mutex lock_;
     std::atomic<bool> isConnF_;
+    std::atomic<bool> exitF_;
+
+private:
+    void _logger(const char* fmt, ...)
+    {
+        if (this->prop_.verbose)
+        {
+            double timestamp = std::chrono::high_resolution_clock::now().time_since_epoch().count() / 1000000000.0;
+            char printBuf[1024];
+            sprintf(printBuf, "[%.9lf] %s", timestamp, fmt);
+            va_list args;
+            va_start(args, fmt);
+            vprintf(printBuf, args);
+            va_end(args);
+        }
+    }
 
 public:
-    SocketClient(const SocketProp& prop) : sockFd_(-1), isConnF_(false)
+    SocketClient(const SocketProp& prop) : sockFd_(-1), isConnF_(false), exitF_(false)
     {
         try
         {
@@ -52,7 +69,10 @@ public:
             setsockopt(this->sockFd_, SOL_SOCKET, SO_SNDTIMEO, (char *)&timeout, sizeof(timeout));
 
             if (this->sockFd_ == -1)
+            {
+                this->_logger("[SocketClient] Open socket error.\n");
                 throw "[SocketClient] Open socket error.";
+            }
             // Filled struct.
             memset(&this->stSockAddr_, 0, sizeof(struct sockaddr_in));
             this->stSockAddr_.sin_family = AF_INET;
@@ -60,19 +80,24 @@ public:
             if (inet_pton(AF_INET, this->prop_.host, &this->stSockAddr_.sin_addr) <= 0)
             {
                 close(this->sockFd_);
+                this->_logger("[SocketClient] Fill struct error.\n");
                 throw "[SocketClient] Fill struct error.";
             }
         }
         catch (const char* msg)
         {
-            printf("[SocketClient] Caught exception: %s\n", msg);
             throw msg;
         }
         catch (...)
         {
-            printf("[SocketClient] Caught Unknow exception.\n");
+            this->_logger("[SocketClient] Unknow exception.\n");
             throw "[SocketClient] Unknow exception.";
         }
+    }
+
+    ~SocketClient()
+    {
+        this->disconnect();
     }
 
     SocketClientStatus connect()
@@ -90,17 +115,26 @@ public:
             return SocketClientStatus::ERROR;
         }
         this->isConnF_ = true;
+        this->_logger("[SocketClient::connect] Connected to server.\n");
         return SocketClientStatus::SUCCESS;
     }
 
     SocketClientStatus disconnect()
     {
+        if (this->exitF_)// Ignore process if called repeatedly.
+            return ALREADY_DISCONNECTED;
+        this->exitF_ = true;// All looping process will be braked if exitF_ set to true.
+
         std::lock_guard<std::mutex> locker(this->lock_);
         this->isConnF_ = false;
         try
         {
-            shutdown(this->sockFd_, SHUT_RDWR);
-            close(this->sockFd_);
+            if (this->sockFd_ != -1)
+            {
+                shutdown(this->sockFd_, SHUT_RDWR);
+                close(this->sockFd_);
+            }
+            this->_logger("[SocketClient::disconnect] Disconnected from server.\n");
             return SocketClientStatus::SUCCESS;
         }
         catch (...)
@@ -114,8 +148,20 @@ public:
         std::lock_guard<std::mutex> locker(this->lock_);
         try
         {
+            if (this->prop_.verbose)
+            {
+                // Show first 32 bytes of message in hex and formed into string using sprintf.
+                char printBuf[256];
+                int i = 0;
+                for (i = 0; i < 48 && i < size; i++)
+                    sprintf(printBuf + i * 3, "%02X ", msg[i]);
+                if (i < size)
+                    sprintf(printBuf + i * 3, "...");
+                this->_logger("[SocketClient::send] Start send message: %s\n", printBuf);
+            }
             if (::send(this->sockFd_, msg, size, MSG_DONTWAIT) < 0)
                 return SocketClientStatus::ERROR;
+            this->_logger("[SocketClient::send] Message sent.\n");
         }
         catch(...)
         {
@@ -133,8 +179,10 @@ public:
         std::lock_guard<std::mutex> locker(this->lock_);
         try
         {
+            this->_logger("[SocketClient::recv] Start recv.\n");
             if (::recv(this->sockFd_, recvBuf, size, 0) <= 0)
                 return SocketClientStatus::ERROR;
+            this->_logger("[SocketClient::recv] Received message: %s\n", recvBuf);
         }
         catch(...)
         {
@@ -148,8 +196,11 @@ public:
         std::lock_guard<std::mutex> locker(this->lock_);
         try
         {
+            this->_logger("[SocketClient::flushRecvBuffer] Start flush recv buffer.\n");
             unsigned char recvBuf[1024];
-            ::recv(this->sockFd_, recvBuf, 1024, MSG_DONTWAIT);
+            if (::recv(this->sockFd_, recvBuf, 1024, MSG_DONTWAIT) < 0)
+                return SocketClientStatus::ERROR;
+            this->_logger("[SocketClient::flushRecvBuffer] End flush recv buffer.\n");
         }
         catch(...)
         {
@@ -175,6 +226,9 @@ private:
     SocketClient *testSock_;// Port 10002.
     SocketClient *aliveSock_;// Por 10003.
     SocketClient *dataSock_;// Port 10004.
+    std::mutex testSockLock_;// Lock testSock_.
+    std::mutex aliveSockLock_;// Lock aliveSock_.
+    std::mutex dataSockLock_;// Lock dataSock_.
 
     std::atomic<bool> isConnF_;
 
@@ -212,12 +266,15 @@ private:
 
     void _sendAliveTh()
     {
+        std::unique_lock<std::mutex> locker(this->aliveSockLock_, std::defer_lock);
         while (!this->exitF_)
         {
             this->_logger("[JimIDClient::_sendAliveTh] Start send alive signal.\n");
             std::vector<unsigned char> tmp = { 0x42, 0x42, 0x42, 0x42 };
             auto buf = this->_packMsg(tmp.data(), tmp.size());
+            locker.lock();
             this->aliveSock_->send(buf, tmp.size() + 4);
+            locker.unlock();
             delete buf;
             this->_logger("[JimIDClient::_sendAliveTh] End send alive signal.\n");
             std::this_thread::sleep_for(std::chrono::seconds(3));
@@ -226,12 +283,21 @@ private:
 
     void _flushRecvBufferTh()
     {
+        std::unique_lock<std::mutex> aliveSockLocker(this->aliveSockLock_, std::defer_lock);
+        std::unique_lock<std::mutex> dataSockLocker(this->dataSockLock_, std::defer_lock);
+        std::unique_lock<std::mutex> testSockLocker(this->testSockLock_, std::defer_lock);
         while (!this->exitF_)
         {
             this->_logger("[JimIDClient::_flushRecvBufferTh] Start flush recv buffer.\n");
+            testSockLocker.lock();
             this->testSock_->flushRecvBuffer();
+            testSockLocker.unlock();
+            aliveSockLocker.lock();
             this->aliveSock_->flushRecvBuffer();
+            aliveSockLocker.unlock();
+            dataSockLocker.lock();
             this->dataSock_->flushRecvBuffer();
+            dataSockLocker.unlock();
             this->_logger("[JimIDClient::_flushRecvBufferTh] End flush recv buffer.\n");
             std::this_thread::sleep_for(std::chrono::seconds(5));
         }
@@ -260,41 +326,71 @@ public:
     {
         if (this->isConnF_ || this->exitF_)
             return false;
+        std::unique_lock<std::mutex> testSockLocker(this->testSockLock_, std::defer_lock);
+        std::unique_lock<std::mutex> aliveSockLocker(this->aliveSockLock_, std::defer_lock);
+        std::unique_lock<std::mutex> dataSockLocker(this->dataSockLock_, std::defer_lock);
+
         this->_logger("[JimIDClient::connect] Create socket.\n");
-        this->testSock_ = new SocketClient({ this->prop_.host, 10002, IPPROTO_TCP });
-        this->aliveSock_ = new SocketClient({ this->prop_.host, 10003, IPPROTO_TCP });
-        this->dataSock_ = new SocketClient({ this->prop_.host, 10004, IPPROTO_TCP });
+
+        testSockLocker.lock();
+        aliveSockLocker.lock();
+        dataSockLocker.lock();
+        try
+        {
+            this->testSock_ = new SocketClient({ this->prop_.host, 10002, IPPROTO_TCP, this->prop_.verbose });
+            this->aliveSock_ = new SocketClient({ this->prop_.host, 10003, IPPROTO_TCP, this->prop_.verbose });
+            this->dataSock_ = new SocketClient({ this->prop_.host, 10004, IPPROTO_TCP, this->prop_.verbose });
+        }
+        catch(...)
+        {
+            if (this->testSock_ != nullptr)
+            {
+                delete this->testSock_;
+                this->testSock_ = nullptr;
+            }
+            if (this->aliveSock_ != nullptr)
+            {
+                delete this->aliveSock_;
+                this->aliveSock_ = nullptr;
+            }
+            if (this->dataSock_ != nullptr)
+            {
+                delete this->dataSock_;
+                this->dataSock_ = nullptr;
+            }
+            this->_logger("[JimIDClient::connect] Create socket error.\n");
+            dataSockLocker.unlock();
+            aliveSockLocker.unlock();
+            testSockLocker.unlock();
+            return false;
+        }
 
         this->_logger("[JimIDClient::connect] Connect to server.\n");
-        if (this->testSock_->connect() != SocketClientStatus::ERROR && 
-            this->aliveSock_->connect() != SocketClientStatus::ERROR && 
-            this->dataSock_->connect() != SocketClientStatus::ERROR)
+        bool connF = true;
+        connF &= this->testSock_->connect() != SocketClientStatus::ERROR;
+        connF &= this->aliveSock_->connect() != SocketClientStatus::ERROR;
+        connF &= this->dataSock_->connect() != SocketClientStatus::ERROR;
+
+        if (connF)
         {
             std::vector<unsigned char> tmp = { 0x69, 0x74, 0x72, 0x69, 0x00, 0x03, 0x01, 0x00, 0x00, this->prop_.controllerId };
             auto buf = this->_packMsg(tmp.data(), tmp.size());
             this->_logger("[JimIDClient::connect] Send controller id.\n");
-            if (this->testSock_->send(buf, tmp.size() + 4) == SocketClientStatus::SUCCESS && 
-                this->aliveSock_->send(buf, tmp.size() + 4) == SocketClientStatus::SUCCESS)
-            {
-                // Start alive thread.
-                this->_logger("[JimIDClient::connect] Start alive thread.\n");
-                this->sendAliveTh_ = new std::thread(&JimIDClient::_sendAliveTh, this);
-                this->_logger("[JimIDClient::connect] Start flush recv buffer thread.\n");
-                this->flushRecvBufferTh_ = new std::thread(&JimIDClient::_flushRecvBufferTh, this);
-                this->isConnF_ = true;
-            }
-            else
-            {
-                this->_logger("[JimIDClient::connect] Send controller id error.\n");
-                this->isConnF_ = false;
-            }
-            delete buf;
+            connF &= this->testSock_->send(buf, tmp.size() + 4) == SocketClientStatus::SUCCESS;
+            connF &= this->aliveSock_->send(buf, tmp.size() + 4) == SocketClientStatus::SUCCESS;
         }
-        else
+
+        dataSockLocker.unlock();
+        aliveSockLocker.unlock();
+        testSockLocker.unlock();
+
+        if (connF)
         {
-            delete this->testSock_;
-            delete this->aliveSock_;
-            delete this->dataSock_;
+            this->_logger("[JimIDClient::connect] Start alive thread.\n");
+            this->sendAliveTh_ = new std::thread(&JimIDClient::_sendAliveTh, this);
+            this->_logger("[JimIDClient::connect] Start flush recv buffer thread.\n");
+            this->flushRecvBufferTh_ = new std::thread(&JimIDClient::_flushRecvBufferTh, this);
+            this->isConnF_ = true;
         }
         return this->isConnF_;
     }
@@ -309,7 +405,7 @@ public:
     {
         if (!this->isConnF_ || vec.size() != prk.size() || vec.size() != this->prop_.driveMotorIdVec.size())
             return false;
-
+        std::lock_guard<std::mutex> dataSockLocker(this->dataSockLock_);
         bool ret = true;
 
         for (int i = 0; i < vec.size(); i++)
@@ -320,9 +416,15 @@ public:
                                                 static_cast<unsigned char>(abs(vec[i])), 
                                                 this->prop_.driveMotorIdVec[i] };
             auto buf = this->_packMsg(tmp.data(), tmp.size());
-            ret &= this->dataSock_->send(buf, tmp.size() + 4) == SocketClientStatus::SUCCESS;
             this->_logger("[JimIDClient::sendDriveMotorSignal] Send drive motor signal: %d\n", this->prop_.driveMotorIdVec[i]);
+            ret &= this->dataSock_->send(buf, tmp.size() + 4) == SocketClientStatus::SUCCESS;
             delete buf;
+            if (!ret)
+            {
+                this->isConnF_ = false;
+                break;
+            }
+            this->_logger("[JimIDClient::sendDriveMotorSignal] Signal sent.\n");
         }
         return ret;
     }
@@ -336,7 +438,7 @@ public:
     {
         if (!this->isConnF_ || vec.size() != this->prop_.steeringMotorIdVec.size())
             return false;
-
+        std::lock_guard<std::mutex> dataSockLocker(this->dataSockLock_);
         bool ret = true;
 
         for (int i = 0; i < vec.size(); i++)
@@ -347,8 +449,13 @@ public:
                                                 this->prop_.steeringMotorIdVec[i] };
             auto buf = this->_packMsg(tmp.data(), tmp.size());
             ret &= this->dataSock_->send(buf, tmp.size() + 4) == SocketClientStatus::SUCCESS;
-            this->_logger("[JimIDClient::sendSteeringMotorSignal] Send steering motor signal: %d\n", this->prop_.steeringMotorIdVec[i]);
             delete buf;
+            if (!ret)
+            {
+                this->isConnF_ = false;
+                break;
+            }
+            this->_logger("[JimIDClient::sendSteeringMotorSignal] Signal sent.\n");
         }
         return ret;
     }
@@ -357,11 +464,13 @@ public:
 
     void close()
     {
-        if (!this->exitF_)
-            this->exitF_ = true;
-        else// Already exit.
+        if (this->exitF_)
             return;
+        this->exitF_ = true;
 
+        std::lock_guard<std::mutex> testSockLocker(this->testSockLock_);
+        std::lock_guard<std::mutex> aliveSockLocker(this->aliveSockLock_);
+        std::lock_guard<std::mutex> dataSockLocker(this->dataSockLock_);
         this->isConnF_ = false;
 
         this->_logger("[JimIDClient::close] Join send alive thread.\n");
@@ -383,18 +492,18 @@ public:
         this->_logger("[JimIDClient::close] Disconnecting socket.\n");
         if (this->testSock_ != nullptr)
         {
-            this->testSock_->disconnect();
             delete this->testSock_;
+            this->testSock_ = nullptr;
         }
         if (this->aliveSock_ != nullptr)
         {
-            this->aliveSock_->disconnect();
             delete this->aliveSock_;
+            this->aliveSock_ = nullptr;
         }
         if (this->dataSock_ != nullptr)
         {
-            this->dataSock_->disconnect();
             delete this->dataSock_;
+            this->dataSock_ = nullptr;
         }
         this->_logger("[JimIDClient::close] Socket deleted.\n");
     }

@@ -970,7 +970,6 @@ private:
                 }
                 else
                 {
-                    this->idclient_->close();
                     delete this->idclient_;
                     this->idclient_ = new JimIDClient(prop);
                     this->idclientF_ = this->idclient_->connect();
@@ -984,6 +983,8 @@ private:
                 this->idclientF_ = false;
                 RCLCPP_ERROR(this->get_logger(), "[ControlServer::_idclientCbFunc] Caught unexpected error.");
             }
+            if (!this->idclientF_)
+                RCLCPP_ERROR(this->get_logger(), "[ControlServer::_idclientCbFunc] ID client connection failed.");
         }
     }
 
@@ -1311,7 +1312,6 @@ INIT_SERVICE_TAG:
         // Delete idclient.
         if (this->idclient_ != nullptr)
         {
-            this->idclient_->close();
             delete this->idclient_;
         }
         // Destroy joystick timer.
