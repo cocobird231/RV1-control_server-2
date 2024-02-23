@@ -37,10 +37,15 @@ def generate_launch_description():
                     "externalIDServerPort" : data['external_prop']['port'], 
                     "externalIDServerDeviceID" : data['external_prop']['ID'], 
                     "serviceName" : data['service_prop']['serviceName'] + '_' + str(data['generic_prop']['id']), 
-                    "topicName" : data['topic_Control']['topicName'] + '_' + str(data['generic_prop']['id']), 
-                    "publishInterval_ms" : data['topic_Control']['publishInterval_ms'], 
-                    "enableOutput" : data['control_prop']['enableOutput'], 
-                    "outputPeriod_ms" : data['control_prop']['outputPeriod_ms'], 
+                    "topicName" : data['topic_prop']['topicName'] + '_' + str(data['generic_prop']['id']), 
+                    "enableOutput" : data['timer_prop']['enableOutput'], 
+                    "outputPeriod_ms" : data['timer_prop']['outputPeriod_ms'], 
+                    "enableSafetyCheck" : data['timer_prop']['enableSafetyCheck'], 
+                    "safetyCheckPeriod_ms" : data['timer_prop']['safetyCheckPeriod_ms'], 
+                    "enableIdclientCheck" : data['timer_prop']['enableIdclientCheck'], 
+                    "idclientCheckPeriod_ms" : data['timer_prop']['idclientCheckPeriod_ms'], 
+                    "enablePublish" : data['timer_prop']['enablePublish'], 
+                    "publishPeriod_ms" : data['timer_prop']['publishPeriod_ms'], 
 
                     # Settings for Params class under vehicle_interfaces/params.h
                     # Do not change the settings rashly

@@ -23,12 +23,14 @@
 #include "vehicle_interfaces/msg/chassis_info.hpp"
 #include "vehicle_interfaces/msg/control_chassis.hpp"
 #include "vehicle_interfaces/msg/controller_info.hpp"
+#include "vehicle_interfaces/msg/control_server.hpp"
 #include "vehicle_interfaces/msg/control_steering_wheel.hpp"
 
 #include "vehicle_interfaces/srv/control_chassis_reg.hpp"
 #include "vehicle_interfaces/srv/control_chassis_req.hpp"
 #include "vehicle_interfaces/srv/controller_info_reg.hpp"
 #include "vehicle_interfaces/srv/controller_info_req.hpp"
+#include "vehicle_interfaces/srv/control_server.hpp"
 #include "vehicle_interfaces/srv/control_steering_wheel_reg.hpp"
 #include "vehicle_interfaces/srv/control_steering_wheel_req.hpp"
 
@@ -66,10 +68,12 @@ public:
 
     std::string serviceName = "controlserver";
     std::string topicName = "controlserver";
-    double publishInterval_ms = 0.05;
+    double publishInterval_ms = 50.0;
 
     bool enableOutput = false;
-    double outputPeriod_ms = 0.05;
+    double outputPeriod_ms = 80;
+    double safetyCheckPeriod_ms = 50.0;
+    double idclientCheckPeriod_ms = 1000.0;
 
 private:
     void _getParams()
@@ -91,6 +95,8 @@ private:
 
         this->get_parameter("enableOutput", this->enableOutput);
         this->get_parameter("outputPeriod_ms", this->outputPeriod_ms);
+        this->get_parameter("safetyCheckPeriod_ms", this->safetyCheckPeriod_ms);
+        this->get_parameter("idclientCheckPeriod_ms", this->idclientCheckPeriod_ms);
     }
 
     rcl_interfaces::msg::SetParametersResult _paramsCallback(const std::vector<rclcpp::Parameter>& params)
@@ -139,6 +145,8 @@ public:
 
         this->declare_parameter<bool>("enableOutput", this->enableOutput);
         this->declare_parameter<double>("outputPeriod_ms", this->outputPeriod_ms);
+        this->declare_parameter<double>("safetyCheckPeriod_ms", this->safetyCheckPeriod_ms);
+        this->declare_parameter<double>("idclientCheckPeriod_ms", this->idclientCheckPeriod_ms);
 
         this->_getParams();
 
@@ -210,17 +218,23 @@ private:
     std::atomic<size_t> selectedControllerIdx_;// The index of selected controller in controllerIdx_.
     std::string selectedControllerServiceName_;// The service name of selected controller.
     vehicle_interfaces::Timer* controllerSwitchTm_;// Call _controllerSwitchCbFunc().
+    std::atomic<double> controllerSwitchTmPeriod_ms_;// The period of controller switch.
+    std::atomic<bool> controllerSwitchTmF_;// Enable/Disable controller switch output.
 
     // Safety check.
     std::array<float, 8> emPs_;// Store 8-direction emergency percentages.
     std::mutex emPsLock_;// Lock emPs_.
     std::atomic<bool> safetyF_;// Check valid emPs_.
     vehicle_interfaces::Timer* safetyTm_;// Call _safetyCbFunc().
+    std::atomic<double> safetyTmPeriod_ms_;// The period of safety check.
+    std::atomic<bool> safetyTmF_;// Enable/Disable safety check.
 
     // JimIDClient socket.
     JimIDClient *idclient_;
     std::atomic<bool> idclientF_;// Check valid idclient_.
     vehicle_interfaces::Timer* idclientTm_;// Call _idclientCbFunc().
+    std::atomic<double> idclientTmPeriod_ms_;// The period of idclient check.
+    std::atomic<bool> idclientTmF_;// Enable/Disable idclient check.
 
     // Publisher.
     rclcpp::Publisher<vehicle_interfaces::msg::Chassis>::SharedPtr publisher_;// Publisher for chassis signal.
@@ -228,10 +242,13 @@ private:
     u_int64_t publishFrameId_;// Frame count for publish message.
     std::mutex publishMsgLock_;// Lock publishMsg_.
     vehicle_interfaces::Timer* publishTm_;// Call _publishCbFunc().
+    std::atomic<double> publishTmPeriod_ms_;// The period of publish message.
+    std::atomic<bool> publishTmF_;// Enable/Disable publish message.
 
     // ControllerInfoReg and ControllerInfoReq server.
-    rclcpp::Service<vehicle_interfaces::srv::ControllerInfoReg>::SharedPtr regServer_;// For Controller register.
-    rclcpp::Service<vehicle_interfaces::srv::ControllerInfoReq>::SharedPtr reqServer_;// Get current Controller info.
+    rclcpp::Service<vehicle_interfaces::srv::ControllerInfoReg>::SharedPtr controllerInfoRegServer_;// For Controller register.
+    rclcpp::Service<vehicle_interfaces::srv::ControllerInfoReq>::SharedPtr controllerInfoReqServer_;// Get current Controller info.
+    rclcpp::Service<vehicle_interfaces::srv::ControlServer>::SharedPtr statusServer_;// Set/Get current status.
 
     // Node control.
     std::atomic<bool> exitF_;
@@ -628,18 +645,20 @@ private:
      */
 
     /**
-     * Check valid controler index. 
-     * The selectedControllerIdx_ and selectedControllerServiceName_ will be modified to -1 and "" respectively if idx is invalid.
-     * @param[in] lockF determined whether using controllerLock_ or not. Default: true.
+     * Set output controller by index.
+     * The selectedControllerIdx_ and selectedControllerServiceName_ will be modified to -1 and "" respectively if index is invalid. 
+     * Otherwise, the selectedControllerIdx_ and selectedControllerServiceName_ will be modified to index and related service name respectively.
+     * @param[in] idx the index of controller desired to be selected.
      * @return true if index is valid. Otherwise, return false.
+     * @note This function is using controllerLock_.
      */
-    bool _checkSelectedController(bool lockF = true)
+    bool _setOutputController(size_t idx)
     {
-        if (lockF)
-            std::lock_guard<std::mutex> locker(this->controllerLock_);
-        if (this->selectedControllerIdx_ >= 0 && this->selectedControllerIdx_ < this->controllerIdx_.size())
+        std::lock_guard<std::mutex> locker(this->controllerLock_);
+        if (idx >= 0 && idx < this->controllerIdx_.size())
         {
-            this->selectedControllerServiceName_ = this->controllerIdx_[this->selectedControllerIdx_];
+            this->selectedControllerIdx_ = idx;
+            this->selectedControllerServiceName_ = this->controllerIdx_[idx];
             return true;
         }
         this->selectedControllerIdx_ = -1;
@@ -648,10 +667,76 @@ private:
     }
 
     /**
+     * Set output controller by controller service name.
+     * The selectedControllerIdx_ and selectedControllerServiceName_ will be modified to -1 and "" respectively if service name is invalid. 
+     * Otherwise, the selectedControllerServiceName_ and selectedControllerIdx_ will be modified to service name and related index respectively.
+     * @param[in] serviceName the service name of controller desired to be selected.
+     * @return true if service name is valid. Otherwise, return false.
+     * @note This function is using controllerLock_.
+     */
+    bool _setOutputController(const std::string& serviceName)
+    {
+        std::lock_guard<std::mutex> locker(this->controllerLock_);
+        if (this->controllerMap_.find(serviceName) != this->controllerMap_.end())
+        {
+            this->selectedControllerServiceName_ = serviceName;
+            for (int i = 0; i < this->controllerIdx_.size(); i++)
+                if (this->controllerIdx_[i] == serviceName)
+                {
+                    this->selectedControllerIdx_ = i;
+                    return true;
+                }
+        }
+        this->selectedControllerIdx_ = -1;
+        this->selectedControllerServiceName_ = "";
+        return false;
+    }
+
+    /**
+     * Check valid output controller.
+     * @return true if index and service name of output controller is valid. Otherwise, return false.
+     * @note This function is using controllerLock_.
+     */
+    bool _checkOutputController()
+    {
+        std::lock_guard<std::mutex> locker(this->controllerLock_);
+        return this->selectedControllerIdx_ != -1 && 
+                this->selectedControllerServiceName_ != "";
+    }
+
+    /**
+     * Get ControllerInfo of output controller.
+     * @param[out] outInfo describes the output controller information.
+     * @return true if index and service name of output controller is valid. Otherwise, return false.
+     * @note This function is using controllerLock_.
+     */
+    bool _getOutputControllerInfo(vehicle_interfaces::msg::ControllerInfo& outInfo)
+    {
+        if (this->_checkOutputController())
+        {
+            std::lock_guard<std::mutex> locker(this->controllerLock_);
+            outInfo = this->controllerMap_[this->selectedControllerServiceName_]->getInfo();
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Get index and service name of output controller.
+     * @return a pair of index and service name of output controller.
+     * @note This function is using controllerLock_.
+     */
+    std::pair<size_t, std::string> _getOutputControllerPos()
+    {
+        std::lock_guard<std::mutex> locker(this->controllerLock_);
+        return { this->selectedControllerIdx_, this->selectedControllerServiceName_ };
+    }
+
+    /**
      * Add ControlServerController node to map and executor, then new thread to spin.
-     * IMPORTANT: This function is using controllerLock_.
      * @param[in] info describes the controller information.
      * @return true if controller added. Otherwise, return false.
+     * @note This function is using controllerLock_.
      */
     bool _addController(const vehicle_interfaces::msg::ControllerInfo& info)
     {
@@ -708,18 +793,18 @@ private:
     /**
      * Remove ControlServerController node and delete thread and executor.
      * If removed controller was the selected one, the selected index will be set to -1.
-     * IMPORTANT: This function is using controllerLock_.
      * @param[in] serviceName the name of controller desired to be removed.
      * @return true if remove successfully. Otherwise, return false.
+     * @note This function is using controllerLock_.
      */
     bool _removeController(const std::string& serviceName)
     {
+        // Check current controller.
+        bool currentIdxF = this->_checkOutputController();
+
         std::lock_guard<std::mutex> locker(this->controllerLock_);
         if (this->controllerMap_.find(serviceName) == this->controllerMap_.end())// serviceName not exist.
             return false;
-
-        // Check valid current index.
-        bool currentIdxF = this->_checkSelectedController(false);
 
         // Start remove process...
         try
@@ -804,9 +889,13 @@ private:
                 this->selectedControllerIdx_++;
             else
                 this->selectedControllerIdx_ = this->controllerIdx_.size() - 1;
+            this->selectedControllerServiceName_ = this->controllerIdx_[this->selectedControllerIdx_];
         }
         else
+        {
             this->selectedControllerIdx_ = -1;
+            this->selectedControllerServiceName_ = "";
+        }
     }
 
     /**
@@ -822,9 +911,13 @@ private:
                 this->selectedControllerIdx_--;
             else
                 this->selectedControllerIdx_ = 0;
+            this->selectedControllerServiceName_ = this->controllerIdx_[this->selectedControllerIdx_];
         }
         else
+        {
             this->selectedControllerIdx_ = -1;
+            this->selectedControllerServiceName_ = "";
+        }
     }
 
 
@@ -1004,7 +1097,7 @@ private:
         std::unique_lock<std::mutex> controllerLocker(this->controllerLock_, std::defer_lock);
 
         // Check joystick and valid selected controller.
-        if (!this->joystickF_ || this->joystickBrakeF_ || !this->_checkSelectedController())
+        if (!this->joystickF_ || this->joystickBrakeF_ || !this->_checkOutputController())
         {
             this->_brkSignal();
             RCLCPP_WARN(this->get_logger(), "[ControlServer::_controllerSwitchCbFunc] Joystick brake or controller index error.");
@@ -1112,31 +1205,31 @@ private:
      */
 
     /** Callback function for Controller register. */
-    void _regServerCallback(const std::shared_ptr<vehicle_interfaces::srv::ControllerInfoReg::Request> request, 
+    void _controllerInfoRegServerCbFunc(const std::shared_ptr<vehicle_interfaces::srv::ControllerInfoReg::Request> request, 
                             std::shared_ptr<vehicle_interfaces::srv::ControllerInfoReg::Response> response)
     {
-        RCLCPP_INFO(this->get_logger(), "[ControlServer::_regServerCallback]");
+        RCLCPP_INFO(this->get_logger(), "[ControlServer::_controllerInfoRegServerCbFunc]");
         if (this->exitF_)
         {
-            RCLCPP_INFO(this->get_logger(), "[ControlServer::_regServerCallback] exit flag set.");
+            RCLCPP_INFO(this->get_logger(), "[ControlServer::_controllerInfoRegServerCbFunc] exit flag set.");
             response->response = false;
             return;
         }
 
         if (this->_addController(request->request))
         {
-            RCLCPP_INFO(this->get_logger(), "[ControlServer::_regServerCallback] Add %s controller.", request->request.service_name.c_str());
+            RCLCPP_INFO(this->get_logger(), "[ControlServer::_controllerInfoRegServerCbFunc] Add %s controller.", request->request.service_name.c_str());
             response->response = true;
         }
         else
         {
-            RCLCPP_WARN(this->get_logger(), "[ControlServer::_regServerCallback] Add %s controller failed.", request->request.service_name.c_str());
+            RCLCPP_WARN(this->get_logger(), "[ControlServer::_controllerInfoRegServerCbFunc] Add %s controller failed.", request->request.service_name.c_str());
             response->response = false;
         }
     }
 
     /** Callback function for request controller information. */
-    void _reqServerCallback(const std::shared_ptr<vehicle_interfaces::srv::ControllerInfoReq::Request> request, 
+    void _controllerInfoReqServerCbFunc(const std::shared_ptr<vehicle_interfaces::srv::ControllerInfoReq::Request> request, 
                             std::shared_ptr<vehicle_interfaces::srv::ControllerInfoReq::Response> response)
     {
         if (this->exitF_)
@@ -1160,6 +1253,104 @@ private:
             response->response = false;
     }
 
+    /** Callback function for set/get Control Server information. */
+    void _statusServerCbFunc(const std::shared_ptr<vehicle_interfaces::srv::ControlServer::Request> request, 
+                            std::shared_ptr<vehicle_interfaces::srv::ControlServer::Response> response)
+    {
+        if (this->exitF_)
+        {
+            response->response = false;
+            return;
+        }
+        response->response = true;
+        if (request->request.controller_action == vehicle_interfaces::msg::ControlServer::CONTROLLER_ACTION_SELECT)
+        {
+            response->response &= this->_setOutputController(request->request.controller_service_name);
+        }
+        else if (request->request.controller_action == vehicle_interfaces::msg::ControlServer::CONTROLLER_ACTION_REMOVE)
+        {
+            response->response &= this->_removeController(request->request.controller_service_name);
+        }
+        if (request->request.server_action & vehicle_interfaces::msg::ControlServer::SERVER_ACTION_SET_PERIOD > 0)
+        {
+            if (request->request.server_output_period_ms > 0)
+            {
+                this->controllerSwitchTm_->setInterval(request->request.server_output_period_ms);
+                this->controllerSwitchTmPeriod_ms_ = request->request.server_output_period_ms;
+            }
+            if (request->request.server_safety_period_ms > 0)
+            {
+                this->safetyTm_->setInterval(request->request.server_safety_period_ms);
+                this->safetyTmPeriod_ms_ = request->request.server_safety_period_ms;
+            }
+            if (request->request.server_idclient_period_ms > 0)
+            {
+                this->idclientTm_->setInterval(request->request.server_idclient_period_ms);
+                this->idclientTmPeriod_ms_ = request->request.server_idclient_period_ms;
+            }
+            if (request->request.server_publish_period_ms > 0)
+            {
+                this->publishTm_->setInterval(request->request.server_publish_period_ms);
+                this->publishTmPeriod_ms_ = request->request.server_publish_period_ms;
+            }
+        }
+        if (request->request.server_action & vehicle_interfaces::msg::ControlServer::SERVER_ACTION_SET_TIMER > 0)
+        {
+            if (request->request.server_output_timer_status == vehicle_interfaces::msg::ControlServer::TIMER_STATUS_START)
+            {
+                this->controllerSwitchTm_->start();
+                this->controllerSwitchTmF_ = true;
+            }
+            else if (request->request.server_output_timer_status == vehicle_interfaces::msg::ControlServer::TIMER_STATUS_STOP)
+            {
+                this->controllerSwitchTm_->stop();
+                this->controllerSwitchTmF_ = false;
+            }
+            if (request->request.server_safety_timer_status == vehicle_interfaces::msg::ControlServer::TIMER_STATUS_START)
+            {
+                this->safetyTm_->start();
+                this->safetyTmF_ = true;
+            }
+            else if (request->request.server_safety_timer_status == vehicle_interfaces::msg::ControlServer::TIMER_STATUS_STOP)
+            {
+                this->safetyTm_->stop();
+                this->safetyTmF_ = false;
+            }
+            if (request->request.server_idclient_timer_status == vehicle_interfaces::msg::ControlServer::TIMER_STATUS_START)
+            {
+                this->idclientTm_->start();
+                this->idclientTmF_ = true;
+            }
+            else if (request->request.server_idclient_timer_status == vehicle_interfaces::msg::ControlServer::TIMER_STATUS_STOP)
+            {
+                this->idclientTm_->stop();
+                this->idclientTmF_ = false;
+            }
+            if (request->request.server_publish_timer_status == vehicle_interfaces::msg::ControlServer::TIMER_STATUS_START)
+            {
+                this->publishTm_->start();
+                this->publishTmF_ = true;
+            }
+            else if (request->request.server_publish_timer_status == vehicle_interfaces::msg::ControlServer::TIMER_STATUS_STOP)
+            {
+                this->publishTm_->stop();
+                this->publishTmF_ = false;
+            }
+        }
+        auto [conIdx, conName] = this->_getOutputControllerPos();
+        vehicle_interfaces::msg::ControlServer res;
+        res.controller_service_name = conName;
+        res.server_output_timer_status = this->controllerSwitchTmF_ ? vehicle_interfaces::msg::ControlServer::TIMER_STATUS_START : vehicle_interfaces::msg::ControlServer::TIMER_STATUS_STOP;
+        res.server_output_period_ms = this->controllerSwitchTmPeriod_ms_;
+        res.server_safety_timer_status = this->safetyTmF_ ? vehicle_interfaces::msg::ControlServer::TIMER_STATUS_START : vehicle_interfaces::msg::ControlServer::TIMER_STATUS_STOP;
+        res.server_safety_period_ms = this->safetyTmPeriod_ms_;
+        res.server_idclient_timer_status = this->idclientTmF_ ? vehicle_interfaces::msg::ControlServer::TIMER_STATUS_START : vehicle_interfaces::msg::ControlServer::TIMER_STATUS_STOP;
+        res.server_idclient_period_ms = this->idclientTmPeriod_ms_;
+        res.server_publish_timer_status = this->publishTmF_ ? vehicle_interfaces::msg::ControlServer::TIMER_STATUS_START : vehicle_interfaces::msg::ControlServer::TIMER_STATUS_STOP;
+        res.server_publish_period_ms = this->publishTmPeriod_ms_;
+        response->status = res;
+    }
+
 public:
     ControlServer(const std::shared_ptr<Params>& params) : 
         vehicle_interfaces::VehicleServiceNode(params), 
@@ -1178,16 +1369,24 @@ public:
         selectedControllerIdx_(-1), 
         selectedControllerServiceName_(""), 
         controllerSwitchTm_(nullptr), 
+        controllerSwitchTmPeriod_ms_(0), 
+        controllerSwitchTmF_(false), 
         // Safety check init.
         safetyF_(false), 
         safetyTm_(nullptr), 
+        safetyTmPeriod_ms_(0), 
+        safetyTmF_(false), 
         // Socket of IDClient init.
         idclient_(nullptr), 
         idclientF_(false), 
         idclientTm_(nullptr), 
+        idclientTmPeriod_ms_(0), 
+        idclientTmF_(false), 
         // Publisher timer init.
         publishFrameId_(0), 
         publishTm_(nullptr), 
+        publishTmPeriod_ms_(0), 
+        publishTmF_(false), 
         // Node.
         exitF_(false), 
         // Chassis.
@@ -1230,33 +1429,42 @@ INIT_JOYSTICK_TAG:
 goto INIT_IDCLIENT_TAG;
 INIT_IDCLIENT_TAG:
             // Create idclient timer.
+            this->idclientTmPeriod_ms_ = params->idclientCheckPeriod_ms;
             RCLCPP_INFO(this->get_logger(), "[ControlServer] Initializing idclient timer...");
-            this->idclientTm_ = new vehicle_interfaces::Timer(1000, std::bind(&ControlServer::_idclientCbFunc, this));
+            this->idclientTm_ = new vehicle_interfaces::Timer(params->idclientCheckPeriod_ms, std::bind(&ControlServer::_idclientCbFunc, this));
             this->idclientTm_->start();
 INIT_SAFETY_TAG:
             // Create safety timer.
+            this->safetyTmPeriod_ms_ = params->safetyCheckPeriod_ms;
             RCLCPP_INFO(this->get_logger(), "[ControlServer] Initializing safety timer...");
             this->emPs_.fill(1);
-            this->safetyTm_ = new vehicle_interfaces::Timer(50, std::bind(&ControlServer::_safetyCbFunc, this));
+            this->safetyTm_ = new vehicle_interfaces::Timer(params->safetyCheckPeriod_ms, std::bind(&ControlServer::_safetyCbFunc, this));
             this->safetyTm_->start();
 INIT_SWITCH_TAG:
             // Create controller switch timer.
+            this->controllerSwitchTmPeriod_ms_ = params->outputPeriod_ms;
+            this->controllerSwitchTmF_ = params->enableOutput;
             RCLCPP_INFO(this->get_logger(), "[ControlServer] Initializing controller switch timer...");
             this->controllerSwitchTm_ = new vehicle_interfaces::Timer(params->outputPeriod_ms, std::bind(&ControlServer::_controllerSwitchCbFunc, this));
-            this->controllerSwitchTm_->start();
+            if (params->enableOutput)
+                this->controllerSwitchTm_->start();
 INIT_PUBLISH_TAG:
             // Create publisher timer.
+            this->publishTmPeriod_ms_ = params->publishInterval_ms;
             RCLCPP_INFO(this->get_logger(), "[ControlServer] Initializing publisher timer...");
             this->publisher_ = this->create_publisher<vehicle_interfaces::msg::Chassis>(params->topicName, 10);
             this->publishTm_ = new vehicle_interfaces::Timer(params->publishInterval_ms, std::bind(&ControlServer::_publishCbFunc, this));
             this->publishTm_->start();
 INIT_SERVICE_TAG:
             // Create register and request services.
-            this->regServer_ = this->create_service<vehicle_interfaces::srv::ControllerInfoReg>(params->serviceName + "_Reg", 
-                std::bind(&ControlServer::_regServerCallback, this, std::placeholders::_1, std::placeholders::_2));
+            this->controllerInfoRegServer_ = this->create_service<vehicle_interfaces::srv::ControllerInfoReg>(params->serviceName + "_Reg", 
+                std::bind(&ControlServer::_controllerInfoRegServerCbFunc, this, std::placeholders::_1, std::placeholders::_2));
 
-            this->reqServer_ = this->create_service<vehicle_interfaces::srv::ControllerInfoReq>(params->serviceName + "_Req", 
-                std::bind(&ControlServer::_reqServerCallback, this, std::placeholders::_1, std::placeholders::_2));
+            this->controllerInfoReqServer_ = this->create_service<vehicle_interfaces::srv::ControllerInfoReq>(params->serviceName + "_Req", 
+                std::bind(&ControlServer::_controllerInfoReqServerCbFunc, this, std::placeholders::_1, std::placeholders::_2));
+
+            this->statusServer_ = this->create_service<vehicle_interfaces::srv::ControlServer>(params->serviceName, 
+                std::bind(&ControlServer::_statusServerCbFunc, this, std::placeholders::_1, std::placeholders::_2));
         }
         catch (const std::string& e)
         {

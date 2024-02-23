@@ -22,14 +22,19 @@ service_prop:
     serviceName : "controlserver" # The _id number will added in suffix, i.e. "<serviceName>_<id>"
 
 # Publish output signal (Chassis.msg)
-topic_Control:
+topic_prop:
     topicName : "controlserver" # The _id number will added in suffix, i.e. "<topicName>_<id>"
-    publishInterval_ms : 50.0
 
-# Control signal for server behavior
-control_prop:
-    enableOutput : False
-    outputPeriod_ms : 50.0
+# Timer properties for output signal, safety check, idclient check, and publish.
+timer_prop:
+    enableOutput : True
+    outputPeriod_ms : 80.0
+    enableSafetyCheck : True
+    safetyCheckPeriod_ms : 50.0
+    enableIdclientCheck : True
+    idclientCheckPeriod_ms : 1000.0
+    enablePublish : True
+    publishPeriod_ms : 50.0
 
 # Settings for Params class under vehicle_interfaces/params.h
 generic_prop:

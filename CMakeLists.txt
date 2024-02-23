@@ -38,9 +38,13 @@ add_executable(server src/main.cpp)
 ament_target_dependencies(server rclcpp vehicle_interfaces)
 # target_link_libraries(server IDClient)
 
+add_executable(control src/control.cpp)
+ament_target_dependencies(control rclcpp vehicle_interfaces)
+
 ## Install
 install(TARGETS
   server
+  control
   DESTINATION lib/${PROJECT_NAME}
 )
 
