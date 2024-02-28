@@ -182,7 +182,7 @@ public:
  * 
  * Functionality test:
  * [x] Test control reg server
- * [ ] Test control req server
+ * [x] Test control req server
  * [x] Test joystick controller
  * [x] Test idclient
  * [x] Test safety
@@ -197,6 +197,8 @@ private:
     const std::shared_ptr<Params> params_;// ControlServer parameters.
     vehicle_interfaces::msg::ChassisInfo cInfo_;// Chassis architecture information.
     std::atomic<bool> cInfoF_;// Check valid cInfo_.
+    // TODO: Add lock for cInfo_.
+    // TODO: cInfo_ should be modifiable by service.
 
     // Joystick controller.
     JoystickInfo jInfo_;// joystick button function configuration.
@@ -1348,6 +1350,7 @@ private:
         res.server_idclient_period_ms = this->idclientTmPeriod_ms_;
         res.server_publish_timer_status = this->publishTmF_ ? vehicle_interfaces::msg::ControlServer::TIMER_STATUS_START : vehicle_interfaces::msg::ControlServer::TIMER_STATUS_STOP;
         res.server_publish_period_ms = this->publishTmPeriod_ms_;
+        res.chassis_info = this->cInfo_;
         response->status = res;
     }
 
@@ -1411,7 +1414,7 @@ public:
                 RCLCPP_ERROR(this->get_logger(), "[ControlServer] Failed to read chassis file: %s", params->chassisFilePath.c_str());
                 return;
             }
-INIT_JOYSTICK_TAG:
+
             // Check JoystickInfo.
             RCLCPP_INFO(this->get_logger(), "[ControlServer] Loading joystick file: %s", params->joystickFilePath.c_str());
             if (ReadJoystickInfo(params->joystickFilePath, this->jInfo_))
@@ -1425,22 +1428,20 @@ INIT_JOYSTICK_TAG:
                 RCLCPP_ERROR(this->get_logger(), "[ControlServer] Failed to read joystick file: %s", params->joystickFilePath.c_str());
                 return;
             }
-// DEBUG
-goto INIT_IDCLIENT_TAG;
-INIT_IDCLIENT_TAG:
+
             // Create idclient timer.
             this->idclientTmPeriod_ms_ = params->idclientCheckPeriod_ms;
             RCLCPP_INFO(this->get_logger(), "[ControlServer] Initializing idclient timer...");
             this->idclientTm_ = new vehicle_interfaces::Timer(params->idclientCheckPeriod_ms, std::bind(&ControlServer::_idclientCbFunc, this));
             this->idclientTm_->start();
-INIT_SAFETY_TAG:
+
             // Create safety timer.
             this->safetyTmPeriod_ms_ = params->safetyCheckPeriod_ms;
             RCLCPP_INFO(this->get_logger(), "[ControlServer] Initializing safety timer...");
             this->emPs_.fill(1);
             this->safetyTm_ = new vehicle_interfaces::Timer(params->safetyCheckPeriod_ms, std::bind(&ControlServer::_safetyCbFunc, this));
             this->safetyTm_->start();
-INIT_SWITCH_TAG:
+
             // Create controller switch timer.
             this->controllerSwitchTmPeriod_ms_ = params->outputPeriod_ms;
             this->controllerSwitchTmF_ = params->enableOutput;
@@ -1448,14 +1449,14 @@ INIT_SWITCH_TAG:
             this->controllerSwitchTm_ = new vehicle_interfaces::Timer(params->outputPeriod_ms, std::bind(&ControlServer::_controllerSwitchCbFunc, this));
             if (params->enableOutput)
                 this->controllerSwitchTm_->start();
-INIT_PUBLISH_TAG:
+
             // Create publisher timer.
             this->publishTmPeriod_ms_ = params->publishInterval_ms;
             RCLCPP_INFO(this->get_logger(), "[ControlServer] Initializing publisher timer...");
             this->publisher_ = this->create_publisher<vehicle_interfaces::msg::Chassis>(params->topicName, 10);
             this->publishTm_ = new vehicle_interfaces::Timer(params->publishInterval_ms, std::bind(&ControlServer::_publishCbFunc, this));
             this->publishTm_->start();
-INIT_SERVICE_TAG:
+
             // Create register and request services.
             this->controllerInfoRegServer_ = this->create_service<vehicle_interfaces::srv::ControllerInfoReg>(params->serviceName + "_Reg", 
                 std::bind(&ControlServer::_controllerInfoRegServerCbFunc, this, std::placeholders::_1, std::placeholders::_2));
