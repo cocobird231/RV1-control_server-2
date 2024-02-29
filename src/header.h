@@ -479,6 +479,8 @@ private:
     {
         if (!this->cInfoF_ || this->cInfo_.vehicle_type != vehicle_interfaces::msg::ChassisInfo::VEHICLE_TYPE_4D4S4B)
             return false;
+        dst.controller_frame_id = src.controller_frame_id;
+        dst.controller_interrupt = src.controller_interrupt;
         int steeringWheel = src.steering;
         int steeringWheelAbs = abs(src.steering);
         double refSpeed = vehicle_interfaces::LinearMapping1d(src.pedal_throttle, 0, 255, 0, 120);
@@ -899,11 +901,13 @@ private:
             else
                 this->selectedControllerIdx_ = this->controllerIdx_.size() - 1;
             this->selectedControllerServiceName_ = this->controllerIdx_[this->selectedControllerIdx_];
+            this->selectedControllerInfo_ = this->controllerMap_[this->selectedControllerServiceName_]->getInfo();
         }
         else
         {
             this->selectedControllerIdx_ = -1;
             this->selectedControllerServiceName_ = "";
+            this->selectedControllerInfo_ = vehicle_interfaces::msg::ControllerInfo();
         }
     }
 
@@ -921,11 +925,13 @@ private:
             else
                 this->selectedControllerIdx_ = 0;
             this->selectedControllerServiceName_ = this->controllerIdx_[this->selectedControllerIdx_];
+            this->selectedControllerInfo_ = this->controllerMap_[this->selectedControllerServiceName_]->getInfo();
         }
         else
         {
             this->selectedControllerIdx_ = -1;
             this->selectedControllerServiceName_ = "";
+            this->selectedControllerInfo_ = vehicle_interfaces::msg::ControllerInfo();
         }
     }
 
@@ -937,7 +943,10 @@ private:
     {
         auto currentInfo = this->_safeCall(&this->selectedControllerInfo_, this->controllerLock_);// Retrieve current selected controller info.
         if (info.privilege < currentInfo.privilege)// Callback controller has higher privilege.
+        {
             this->_setOutputController(info.service_name);
+            RCLCPP_INFO(this->get_logger(), "[ControlServer::_controllerInterruptCbFunc] Switch to %s controller.", info.service_name.c_str());
+        }
     }
 
     /**
