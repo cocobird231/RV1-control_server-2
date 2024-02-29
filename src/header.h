@@ -177,7 +177,7 @@ public:
  * [x] Add safety thread
  * [x] Controller switch (consider timestamp)
  * [x] Publisher thread for chassis signal
- * [ ] Higher priority interruption
+ * [x] Higher priority interruption
  * [x] Dynamic controller removal
  * 
  * Functionality test:
@@ -219,6 +219,7 @@ private:
     // Controller switch.
     std::atomic<size_t> selectedControllerIdx_;// The index of selected controller in controllerIdx_.
     std::string selectedControllerServiceName_;// The service name of selected controller.
+    vehicle_interfaces::msg::ControllerInfo selectedControllerInfo_;// The information of selected controller.
     vehicle_interfaces::Timer* controllerSwitchTm_;// Call _controllerSwitchCbFunc().
     std::atomic<double> controllerSwitchTmPeriod_ms_;// The period of controller switch.
     std::atomic<bool> controllerSwitchTmF_;// Enable/Disable controller switch output.
@@ -661,10 +662,12 @@ private:
         {
             this->selectedControllerIdx_ = idx;
             this->selectedControllerServiceName_ = this->controllerIdx_[idx];
+            this->selectedControllerInfo_ = this->controllerMap_[this->selectedControllerServiceName_]->getInfo();
             return true;
         }
         this->selectedControllerIdx_ = -1;
         this->selectedControllerServiceName_ = "";
+        this->selectedControllerInfo_ = vehicle_interfaces::msg::ControllerInfo();
         return false;
     }
 
@@ -682,6 +685,7 @@ private:
         if (this->controllerMap_.find(serviceName) != this->controllerMap_.end())
         {
             this->selectedControllerServiceName_ = serviceName;
+            this->selectedControllerInfo_ = this->controllerMap_[this->selectedControllerServiceName_]->getInfo();
             for (int i = 0; i < this->controllerIdx_.size(); i++)
                 if (this->controllerIdx_[i] == serviceName)
                 {
@@ -691,6 +695,7 @@ private:
         }
         this->selectedControllerIdx_ = -1;
         this->selectedControllerServiceName_ = "";
+        this->selectedControllerInfo_ = vehicle_interfaces::msg::ControllerInfo();
         return false;
     }
 
@@ -754,12 +759,14 @@ private:
                     // Convert function is required if controller msg type is ControlSteeringWheel.
                     // TODO: more convert function for PWM, RPM and ANGLE.
                     controller->setCvtFunc(std::bind(&ControlServer::_cvtControlSteeringWheelToControlChassis, this, std::placeholders::_1, std::placeholders::_2));
+                    controller->setInterruptFunc(std::bind(&ControlServer::_controllerInterruptCbFunc, this, std::placeholders::_1));
                     this->controllerMap_[info.service_name] = controller;
                 }
                 else if (info.msg_type == vehicle_interfaces::msg::ControllerInfo::MSG_TYPE_CHASSIS)
                 {
                     // Add controller to controllerMap_.
                     auto controller = std::make_shared<vehicle_interfaces::ChassisControllerClient>(info);
+                    controller->setInterruptFunc(std::bind(&ControlServer::_controllerInterruptCbFunc, this, std::placeholders::_1));
                     this->controllerMap_[info.service_name] = controller;
                 }
                 else
@@ -922,7 +929,16 @@ private:
         }
     }
 
-
+    /**
+     * Controller interrupt event handler.
+     * @param[in] info describes the controller information.
+     */
+    void _controllerInterruptCbFunc(const vehicle_interfaces::msg::ControllerInfo& info)
+    {
+        auto currentInfo = this->_safeCall(&this->selectedControllerInfo_, this->controllerLock_);// Retrieve current selected controller info.
+        if (info.privilege < currentInfo.privilege)// Callback controller has higher privilege.
+            this->_setOutputController(info.service_name);
+    }
 
     /**
      * ================================================================
