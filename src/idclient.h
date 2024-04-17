@@ -2,7 +2,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include<netdb.h>
+#include <netdb.h>
 #include <unistd.h>
 
 #include <stdarg.h>
@@ -10,13 +10,16 @@
 #include <cstring>
 #include <cmath>
 
-#include <thread>
+#include <memory>
 #include <chrono>
-
 #include <vector>
 #include <string>
+
+#include <thread>
 #include <atomic>
 #include <mutex>
+
+#include "vehicle_interfaces/utils.h"
 
 struct SocketProp
 {
@@ -223,9 +226,9 @@ struct JimIDClientProp
 class JimIDClient
 {
 private:
-    SocketClient *testSock_;// Port 10002.
-    SocketClient *aliveSock_;// Por 10003.
-    SocketClient *dataSock_;// Port 10004.
+    std::unique_ptr<SocketClient> testSock_;// Port 10002.
+    std::unique_ptr<SocketClient> aliveSock_;// Por 10003.
+    std::unique_ptr<SocketClient> dataSock_;// Port 10004.
     std::mutex testSockLock_;// Lock testSock_.
     std::mutex aliveSockLock_;// Lock aliveSock_.
     std::mutex dataSockLock_;// Lock dataSock_.
@@ -234,8 +237,8 @@ private:
 
     const JimIDClientProp prop_;
 
-    std::thread *sendAliveTh_;
-    std::thread *flushRecvBufferTh_;
+    vehicle_interfaces::unique_thread sendAliveTh_;
+    vehicle_interfaces::unique_thread flushRecvBufferTh_;
     std::atomic<bool> exitF_;
 
 private:
@@ -310,8 +313,6 @@ public:
         aliveSock_(nullptr), 
         dataSock_(nullptr), 
         isConnF_(false), 
-        sendAliveTh_(nullptr), 
-        flushRecvBufferTh_(nullptr), 
         exitF_(false)
     {
         
@@ -326,42 +327,26 @@ public:
     {
         if (this->isConnF_ || this->exitF_)
             return false;
-        std::unique_lock<std::mutex> testSockLocker(this->testSockLock_, std::defer_lock);
-        std::unique_lock<std::mutex> aliveSockLocker(this->aliveSockLock_, std::defer_lock);
-        std::unique_lock<std::mutex> dataSockLocker(this->dataSockLock_, std::defer_lock);
+        std::lock_guard<std::mutex> testSockLocker(this->testSockLock_);
+        std::lock_guard<std::mutex> aliveSockLocker(this->aliveSockLock_);
+        std::lock_guard<std::mutex> dataSockLocker(this->dataSockLock_);
 
         this->_logger("[JimIDClient::connect] Create socket.\n");
-
-        testSockLocker.lock();
-        aliveSockLocker.lock();
-        dataSockLocker.lock();
         try
         {
-            this->testSock_ = new SocketClient({ this->prop_.host, 10002, IPPROTO_TCP, this->prop_.verbose });
-            this->aliveSock_ = new SocketClient({ this->prop_.host, 10003, IPPROTO_TCP, this->prop_.verbose });
-            this->dataSock_ = new SocketClient({ this->prop_.host, 10004, IPPROTO_TCP, this->prop_.verbose });
+            SocketProp testSockProp = { this->prop_.host, 10002, IPPROTO_TCP, this->prop_.verbose };
+            SocketProp aliveSockProp = { this->prop_.host, 10003, IPPROTO_TCP, this->prop_.verbose };
+            SocketProp dataSockProp = { this->prop_.host, 10004, IPPROTO_TCP, this->prop_.verbose };
+            this->testSock_ = std::make_unique<SocketClient>(testSockProp);
+            this->aliveSock_ = std::make_unique<SocketClient>(aliveSockProp);
+            this->dataSock_ = std::make_unique<SocketClient>(dataSockProp);
         }
         catch(...)
         {
-            if (this->testSock_ != nullptr)
-            {
-                delete this->testSock_;
-                this->testSock_ = nullptr;
-            }
-            if (this->aliveSock_ != nullptr)
-            {
-                delete this->aliveSock_;
-                this->aliveSock_ = nullptr;
-            }
-            if (this->dataSock_ != nullptr)
-            {
-                delete this->dataSock_;
-                this->dataSock_ = nullptr;
-            }
             this->_logger("[JimIDClient::connect] Create socket error.\n");
-            dataSockLocker.unlock();
-            aliveSockLocker.unlock();
-            testSockLocker.unlock();
+            this->testSock_.reset(nullptr);
+            this->aliveSock_.reset(nullptr);
+            this->dataSock_.reset(nullptr);
             return false;
         }
 
@@ -380,16 +365,12 @@ public:
             connF &= this->aliveSock_->send(buf, tmp.size() + 4) == SocketClientStatus::SUCCESS;
         }
 
-        dataSockLocker.unlock();
-        aliveSockLocker.unlock();
-        testSockLocker.unlock();
-
         if (connF)
         {
             this->_logger("[JimIDClient::connect] Start alive thread.\n");
-            this->sendAliveTh_ = new std::thread(&JimIDClient::_sendAliveTh, this);
+            this->sendAliveTh_ = vehicle_interfaces::make_unique_thread(&JimIDClient::_sendAliveTh, this);
             this->_logger("[JimIDClient::connect] Start flush recv buffer thread.\n");
-            this->flushRecvBufferTh_ = new std::thread(&JimIDClient::_flushRecvBufferTh, this);
+            this->flushRecvBufferTh_ = vehicle_interfaces::make_unique_thread(&JimIDClient::_flushRecvBufferTh, this);
             this->isConnF_ = true;
         }
         return this->isConnF_;
@@ -474,37 +455,19 @@ public:
         this->isConnF_ = false;
 
         this->_logger("[JimIDClient::close] Join send alive thread.\n");
-        if (this->sendAliveTh_ != nullptr)
-        {
+        if (this->sendAliveTh_ && this->sendAliveTh_->joinable())
             this->sendAliveTh_->join();
-            delete this->sendAliveTh_;
-        }
         this->_logger("[JimIDClient::close] Join send alive thread done.\n");
 
         this->_logger("[JimIDClient::close] Join flush recv buffer thread.\n");
-        if (this->flushRecvBufferTh_ != nullptr)
-        {
+        if (this->flushRecvBufferTh_ && this->flushRecvBufferTh_->joinable())
             this->flushRecvBufferTh_->join();
-            delete this->flushRecvBufferTh_;
-        }
         this->_logger("[JimIDClient::close] Join flush recv buffer thread done.\n");
 
         this->_logger("[JimIDClient::close] Disconnecting socket.\n");
-        if (this->testSock_ != nullptr)
-        {
-            delete this->testSock_;
-            this->testSock_ = nullptr;
-        }
-        if (this->aliveSock_ != nullptr)
-        {
-            delete this->aliveSock_;
-            this->aliveSock_ = nullptr;
-        }
-        if (this->dataSock_ != nullptr)
-        {
-            delete this->dataSock_;
-            this->dataSock_ = nullptr;
-        }
+        this->testSock_.reset(nullptr);
+        this->aliveSock_.reset(nullptr);
+        this->dataSock_.reset(nullptr);
         this->_logger("[JimIDClient::close] Socket deleted.\n");
     }
 };

@@ -18,6 +18,7 @@
 
 #include "rclcpp/rclcpp.hpp"
 #include "vehicle_interfaces/control.h"
+#include "vehicle_interfaces/timer.h"
 #include "vehicle_interfaces/utils.h"
 #include "vehicle_interfaces/msg_json.h"
 #include "vehicle_interfaces/msg/chassis_info.hpp"
@@ -188,8 +189,8 @@ public:
  * [x] Test safety
  * [x] Test controller switch
  * [x] Test publisher
- * [/] Test dynamic controller addition and removal
- * [ ] Test higher priority interruption
+ * [x] Test dynamic controller addition and removal
+ * [x] Test higher priority interruption
  */
 class ControlServer : public vehicle_interfaces::VehicleServiceNode
 {
@@ -205,14 +206,14 @@ private:
     std::atomic<bool> jInfoF_;// Check valid jInfo_.
     FILE *joystick_;// Joystick device.
     std::atomic<bool> joystickF_;// Is joystick controller detected.
-    std::thread* joystickTh_;// Call _joystickTh().
+    vehicle_interfaces::unique_thread joystickTh_;// Call _joystickTh().
     std::atomic<bool> joystickBrakeF_;// State of joystick brake.
     std::atomic<bool> safetyOverControlF_;// State of safety over control.
 
     // Controller storage.
     std::map<std::string, std::shared_ptr<vehicle_interfaces::BaseControllerClient> > controllerMap_;// Store registered controller.
-    std::map<std::string, rclcpp::executors::SingleThreadedExecutor*> controllerExecMap_;
-    std::map<std::string, std::thread*> controllerThMap_;
+    std::map<std::string, std::shared_ptr<rclcpp::executors::SingleThreadedExecutor> > controllerExecMap_;
+    std::map<std::string, vehicle_interfaces::unique_thread> controllerThMap_;
     std::deque<std::string> controllerIdx_;// The vector of controller service name.
     std::mutex controllerLock_;// Lock controllerMap_, controllerExecMap_, controllerThMap_ and controllerIdx_.
 
@@ -220,7 +221,7 @@ private:
     std::atomic<size_t> selectedControllerIdx_;// The index of selected controller in controllerIdx_.
     std::string selectedControllerServiceName_;// The service name of selected controller.
     vehicle_interfaces::msg::ControllerInfo selectedControllerInfo_;// The information of selected controller.
-    vehicle_interfaces::Timer* controllerSwitchTm_;// Call _controllerSwitchCbFunc().
+    std::shared_ptr<vehicle_interfaces::LiteTimer> controllerSwitchTm_;// Call _controllerSwitchCbFunc().
     std::atomic<double> controllerSwitchTmPeriod_ms_;// The period of controller switch.
     std::atomic<bool> controllerSwitchTmF_;// Enable/Disable controller switch output.
 
@@ -228,14 +229,14 @@ private:
     std::array<float, 8> emPs_;// Store 8-direction emergency percentages.
     std::mutex emPsLock_;// Lock emPs_.
     std::atomic<bool> safetyF_;// Check valid emPs_.
-    vehicle_interfaces::Timer* safetyTm_;// Call _safetyCbFunc().
+    std::shared_ptr<vehicle_interfaces::LiteTimer> safetyTm_;// Call _safetyCbFunc().
     std::atomic<double> safetyTmPeriod_ms_;// The period of safety check.
     std::atomic<bool> safetyTmF_;// Enable/Disable safety check.
 
     // JimIDClient socket.
-    JimIDClient *idclient_;
+    std::unique_ptr<JimIDClient> idclient_;
     std::atomic<bool> idclientF_;// Check valid idclient_.
-    vehicle_interfaces::Timer* idclientTm_;// Call _idclientCbFunc().
+    std::shared_ptr<vehicle_interfaces::LiteTimer> idclientTm_;// Call _idclientCbFunc().
     std::atomic<double> idclientTmPeriod_ms_;// The period of idclient check.
     std::atomic<bool> idclientTmF_;// Enable/Disable idclient check.
 
@@ -244,7 +245,7 @@ private:
     vehicle_interfaces::msg::Chassis publishMsg_;// The output signal of controller switch.
     u_int64_t publishFrameId_;// Frame count for publish message.
     std::mutex publishMsgLock_;// Lock publishMsg_.
-    vehicle_interfaces::Timer* publishTm_;// Call _publishCbFunc().
+    std::shared_ptr<vehicle_interfaces::LiteTimer> publishTm_;// Call _publishCbFunc().
     std::atomic<double> publishTmPeriod_ms_;// The period of publish message.
     std::atomic<bool> publishTmF_;// Enable/Disable publish message.
 
@@ -757,7 +758,7 @@ private:
                 if (info.msg_type == vehicle_interfaces::msg::ControllerInfo::MSG_TYPE_STEERING_WHEEL)
                 {
                     // Add controller to controllerMap_.
-                    auto controller = std::make_shared<vehicle_interfaces::SteeringWheelControllerClient>(info);
+                    auto controller = std::make_shared<vehicle_interfaces::SteeringWheelControllerClient>(info.service_name + "_controllerclient", info);
                     // Convert function is required if controller msg type is ControlSteeringWheel.
                     // TODO: more convert function for PWM, RPM and ANGLE.
                     controller->setCvtFunc(std::bind(&ControlServer::_cvtControlSteeringWheelToControlChassis, this, std::placeholders::_1, std::placeholders::_2));
@@ -767,7 +768,7 @@ private:
                 else if (info.msg_type == vehicle_interfaces::msg::ControllerInfo::MSG_TYPE_CHASSIS)
                 {
                     // Add controller to controllerMap_.
-                    auto controller = std::make_shared<vehicle_interfaces::ChassisControllerClient>(info);
+                    auto controller = std::make_shared<vehicle_interfaces::ChassisControllerClient>(info.service_name + "_controllerclient", info);
                     controller->setInterruptFunc(std::bind(&ControlServer::_controllerInterruptCbFunc, this, std::placeholders::_1));
                     this->controllerMap_[info.service_name] = controller;
                 }
@@ -775,11 +776,11 @@ private:
                     throw "Unknown msg_type.";
 
                 // New executor and add controller.
-                this->controllerExecMap_[info.service_name] = new rclcpp::executors::SingleThreadedExecutor();
+                this->controllerExecMap_[info.service_name] = std::make_shared<rclcpp::executors::SingleThreadedExecutor>();
                 this->controllerExecMap_[info.service_name]->add_node(this->controllerMap_[info.service_name]);
 
                 // New thread and spin executor.
-                this->controllerThMap_[info.service_name] = new std::thread(vehicle_interfaces::SpinExecutor, this->controllerExecMap_[info.service_name], info.service_name, 1000.0);
+                this->controllerThMap_[info.service_name] = vehicle_interfaces::make_unique_thread(vehicle_interfaces::SpinExecutor, this->controllerExecMap_[info.service_name], info.service_name, 1000.0);
 
                 // Record controller name to vector. For controller switch selected by index.
                 this->controllerIdx_.push_back(info.service_name);
@@ -868,7 +869,6 @@ private:
             this->controllerThMap_.erase(serviceName);
 
             // Delete executor.
-            delete this->controllerExecMap_[serviceName];
             this->controllerExecMap_.erase(serviceName);
 
             // Delete ControlServerController node.
@@ -1083,25 +1083,15 @@ private:
             prop.verbose = false;
             try
             {
-                if (this->idclient_ == nullptr)
-                {
-                    this->idclient_ = new JimIDClient(prop);
-                    this->idclientF_ = this->idclient_->connect();
-                }
-                else
-                {
-                    delete this->idclient_;
-                    this->idclient_ = new JimIDClient(prop);
-                    this->idclientF_ = this->idclient_->connect();
-                }
+                this->idclient_.reset(nullptr);
+                this->idclient_ = std::make_unique<JimIDClient>(prop);
+                this->idclientF_ = this->idclient_->connect();
             }
             catch (...)
             {
-                if (this->idclient_ != nullptr)
-                    delete this->idclient_;
-                this->idclient_ = nullptr;
-                this->idclientF_ = false;
                 RCLCPP_ERROR(this->get_logger(), "[ControlServer::_idclientCbFunc] Caught unexpected error.");
+                this->idclient_.reset(nullptr);
+                this->idclientF_ = false;
             }
             if (!this->idclientF_)
                 RCLCPP_ERROR(this->get_logger(), "[ControlServer::_idclientCbFunc] ID client connection failed.");
@@ -1302,22 +1292,22 @@ private:
         {
             if (request->request.server_output_period_ms > 0)
             {
-                this->controllerSwitchTm_->setInterval(request->request.server_output_period_ms);
+                this->controllerSwitchTm_->setPeriod(request->request.server_output_period_ms);
                 this->controllerSwitchTmPeriod_ms_ = request->request.server_output_period_ms;
             }
             if (request->request.server_safety_period_ms > 0)
             {
-                this->safetyTm_->setInterval(request->request.server_safety_period_ms);
+                this->safetyTm_->setPeriod(request->request.server_safety_period_ms);
                 this->safetyTmPeriod_ms_ = request->request.server_safety_period_ms;
             }
             if (request->request.server_idclient_period_ms > 0)
             {
-                this->idclientTm_->setInterval(request->request.server_idclient_period_ms);
+                this->idclientTm_->setPeriod(request->request.server_idclient_period_ms);
                 this->idclientTmPeriod_ms_ = request->request.server_idclient_period_ms;
             }
             if (request->request.server_publish_period_ms > 0)
             {
-                this->publishTm_->setInterval(request->request.server_publish_period_ms);
+                this->publishTm_->setPeriod(request->request.server_publish_period_ms);
                 this->publishTmPeriod_ms_ = request->request.server_publish_period_ms;
             }
         }
@@ -1389,30 +1379,24 @@ public:
         // Joystick controller init.
         joystick_(nullptr), 
         jInfoF_(false), 
-        joystickTh_(nullptr), 
         joystickBrakeF_(false), 
         safetyOverControlF_(false), 
         joystickF_(false), 
         // Controller switch init.
         selectedControllerIdx_(-1), 
         selectedControllerServiceName_(""), 
-        controllerSwitchTm_(nullptr), 
         controllerSwitchTmPeriod_ms_(0), 
         controllerSwitchTmF_(false), 
         // Safety check init.
         safetyF_(false), 
-        safetyTm_(nullptr), 
         safetyTmPeriod_ms_(0), 
         safetyTmF_(false), 
         // Socket of IDClient init.
-        idclient_(nullptr), 
         idclientF_(false), 
-        idclientTm_(nullptr), 
         idclientTmPeriod_ms_(0), 
         idclientTmF_(false), 
         // Publisher timer init.
         publishFrameId_(0), 
-        publishTm_(nullptr), 
         publishTmPeriod_ms_(0), 
         publishTmF_(false), 
         // Node.
@@ -1445,7 +1429,7 @@ public:
             if (ReadJoystickInfo(params->joystickFilePath, this->jInfo_))
             {
                 this->jInfoF_ = true;
-                this->joystickTh_ = new std::thread(&ControlServer::_joystickTh, this);
+                this->joystickTh_ = vehicle_interfaces::make_unique_thread(&ControlServer::_joystickTh, this);
                 RCLCPP_INFO(this->get_logger(), "[ControlServer] Joystick initialized.");
             }
             else
@@ -1457,21 +1441,21 @@ public:
             // Create idclient timer.
             this->idclientTmPeriod_ms_ = params->idclientCheckPeriod_ms;
             RCLCPP_INFO(this->get_logger(), "[ControlServer] Initializing idclient timer...");
-            this->idclientTm_ = new vehicle_interfaces::Timer(params->idclientCheckPeriod_ms, std::bind(&ControlServer::_idclientCbFunc, this));
+            this->idclientTm_ = std::make_shared<vehicle_interfaces::LiteTimer>(params->idclientCheckPeriod_ms, std::bind(&ControlServer::_idclientCbFunc, this));
             this->idclientTm_->start();
 
             // Create safety timer.
             this->safetyTmPeriod_ms_ = params->safetyCheckPeriod_ms;
             RCLCPP_INFO(this->get_logger(), "[ControlServer] Initializing safety timer...");
             this->emPs_.fill(1);
-            this->safetyTm_ = new vehicle_interfaces::Timer(params->safetyCheckPeriod_ms, std::bind(&ControlServer::_safetyCbFunc, this));
+            this->safetyTm_ = std::make_shared<vehicle_interfaces::LiteTimer>(params->safetyCheckPeriod_ms, std::bind(&ControlServer::_safetyCbFunc, this));
             this->safetyTm_->start();
 
             // Create controller switch timer.
             this->controllerSwitchTmPeriod_ms_ = params->outputPeriod_ms;
             this->controllerSwitchTmF_ = params->enableOutput;
             RCLCPP_INFO(this->get_logger(), "[ControlServer] Initializing controller switch timer...");
-            this->controllerSwitchTm_ = new vehicle_interfaces::Timer(params->outputPeriod_ms, std::bind(&ControlServer::_controllerSwitchCbFunc, this));
+            this->controllerSwitchTm_ = std::make_shared<vehicle_interfaces::LiteTimer>(params->outputPeriod_ms, std::bind(&ControlServer::_controllerSwitchCbFunc, this));
             if (params->enableOutput)
                 this->controllerSwitchTm_->start();
 
@@ -1479,14 +1463,14 @@ public:
             this->publishTmPeriod_ms_ = params->publishInterval_ms;
             RCLCPP_INFO(this->get_logger(), "[ControlServer] Initializing publisher timer...");
             this->publisher_ = this->create_publisher<vehicle_interfaces::msg::Chassis>(params->topicName, 10);
-            this->publishTm_ = new vehicle_interfaces::Timer(params->publishInterval_ms, std::bind(&ControlServer::_publishCbFunc, this));
+            this->publishTm_ = std::make_shared<vehicle_interfaces::LiteTimer>(params->publishInterval_ms, std::bind(&ControlServer::_publishCbFunc, this));
             this->publishTm_->start();
 
             // Create register and request services.
-            this->controllerInfoRegServer_ = this->create_service<vehicle_interfaces::srv::ControllerInfoReg>(params->serviceName + "_Reg", 
+            this->controllerInfoRegServer_ = this->create_service<vehicle_interfaces::srv::ControllerInfoReg>(params->serviceName + "_ControllerInfoReg", 
                 std::bind(&ControlServer::_controllerInfoRegServerCbFunc, this, std::placeholders::_1, std::placeholders::_2));
 
-            this->controllerInfoReqServer_ = this->create_service<vehicle_interfaces::srv::ControllerInfoReq>(params->serviceName + "_Req", 
+            this->controllerInfoReqServer_ = this->create_service<vehicle_interfaces::srv::ControllerInfoReq>(params->serviceName + "_ControllerInfoReq", 
                 std::bind(&ControlServer::_controllerInfoReqServerCbFunc, this, std::placeholders::_1, std::placeholders::_2));
 
             this->statusServer_ = this->create_service<vehicle_interfaces::srv::ControlServer>(params->serviceName, 
@@ -1504,7 +1488,6 @@ public:
         {
             RCLCPP_ERROR(this->get_logger(), "[ControlServer] Caught unexpected error.");
         }
-
         RCLCPP_INFO(this->get_logger(), "[ControlServer] Constructed.");
     }
 
@@ -1520,39 +1503,31 @@ public:
         this->exitF_ = true;// All looping process will be braked if exitF_ set to true.
 
         // Destroy publisher timer.
-        if (this->publishTm_ != nullptr)
+        if (this->publishTm_)
         {
             this->publishTm_->destroy();
-            delete this->publishTm_;
         }
         // Join and delete controller switch thread.
-        if (this->controllerSwitchTm_ != nullptr)
+        if (this->controllerSwitchTm_)
         {
             this->controllerSwitchTm_->destroy();
-            delete this->controllerSwitchTm_;
         }
         // Join and delete safety thread.
-        if (this->safetyTm_ != nullptr)
+        if (this->safetyTm_)
         {
             this->safetyTm_->destroy();
-            delete this->safetyTm_;
         }
         // Destroy idclient timer.
-        if (this->idclientTm_ != nullptr)
+        if (this->idclientTm_)
         {
             this->idclientTm_->destroy();
-            delete this->idclientTm_;
         }
         // Delete idclient.
-        if (this->idclient_ != nullptr)
-        {
-            delete this->idclient_;
-        }
+        this->idclient_.reset(nullptr);
         // Destroy joystick timer.
-        if (this->joystickTh_ != nullptr)
+        if (this->joystickTh_)
         {
             this->joystickTh_->join();
-            delete this->joystickTh_;
         }
         // Delete joystick.
         if (this->joystick_ != nullptr)

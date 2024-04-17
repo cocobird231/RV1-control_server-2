@@ -44,7 +44,7 @@ public:
         this->controlServerClient_ = this->controlServerClientNode_->create_client<vehicle_interfaces::srv::ControlServer>(serviceName);
 
         this->controllerInfoReqClientNode_ = std::make_shared<rclcpp::Node>(nodeName + "_controllerinfo_req_client");
-        this->controllerInfoReqClient_ = this->controllerInfoReqClientNode_->create_client<vehicle_interfaces::srv::ControllerInfoReq>(serviceName + "_Req");
+        this->controllerInfoReqClient_ = this->controllerInfoReqClientNode_->create_client<vehicle_interfaces::srv::ControllerInfoReq>(serviceName + "_ControllerInfoReq");
     }
 
     bool sendRequest(const std::shared_ptr<vehicle_interfaces::srv::ControlServer::Request> req, vehicle_interfaces::msg::ControlServer& res)
@@ -90,8 +90,8 @@ void PrintControllerInfo(const vehicle_interfaces::msg::ControllerInfo& info)
         info.period_ms, 
         info.privilege, 
         info.pub_type == vehicle_interfaces::msg::ControllerInfo::PUB_TYPE_NONE ? "PUB_TYPE_NONE" : 
-            (info.pub_type == vehicle_interfaces::msg::ControllerInfo::PUB_TYPE_CONTROLLER ? "PUB_TYPE_CONTROLLER" : 
-            (info.pub_type == vehicle_interfaces::msg::ControllerInfo::PUB_TYPE_CONTROLSERVER ? "PUB_TYPE_CONTROLSERVER" : "PUB_TYPE_BOTH")));
+            (info.pub_type == vehicle_interfaces::msg::ControllerInfo::PUB_TYPE_CONTROLLER_SERVER ? "PUB_TYPE_CONTROLLER_SERVER" : 
+            (info.pub_type == vehicle_interfaces::msg::ControllerInfo::PUB_TYPE_CONTROLLER_CLIENT ? "PUB_TYPE_CONTROLLER_CLIENT" : "PUB_TYPE_BOTH")));
 }
 
 void PrintControlServer(const vehicle_interfaces::msg::ControlServer& res)
@@ -107,9 +107,9 @@ int main(int argc, char** argv)
 {
     rclcpp::init(argc, argv);
     auto node = std::make_shared<TestNode>(NODE_NAME, SERVICE_NAME);
-    rclcpp::executors::SingleThreadedExecutor* executor = new rclcpp::executors::SingleThreadedExecutor();
+    auto executor = std::make_shared<rclcpp::executors::SingleThreadedExecutor>();
     executor->add_node(node);
-    std::thread execTh(vehicle_interfaces::SpinExecutor, executor, "control", 1000.0);
+    std::thread execTh(vehicle_interfaces::SpinExecutor, executor, NODE_NAME, 1000.0);
 
     bool stopF = false;
     printf("/** \n\
@@ -248,7 +248,6 @@ int main(int argc, char** argv)
 
     executor->cancel();
     execTh.join();
-    delete executor;
     rclcpp::shutdown();
     return 0;
 }
