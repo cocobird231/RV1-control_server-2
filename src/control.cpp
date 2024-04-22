@@ -20,7 +20,7 @@
 #include "vehicle_interfaces/utils.h"
 #include "vehicle_interfaces/msg/controller_info.hpp"
 #include "vehicle_interfaces/srv/controller_info_req.hpp"
-#include "vehicle_interfaces/msg/control_server.hpp"
+#include "vehicle_interfaces/msg/control_server_status.hpp"
 #include "vehicle_interfaces/srv/control_server.hpp"
 
 #define SERVICE_NAME "controlserver_0"
@@ -47,7 +47,7 @@ public:
         this->controllerInfoReqClient_ = this->controllerInfoReqClientNode_->create_client<vehicle_interfaces::srv::ControllerInfoReq>(serviceName + "_ControllerInfoReq");
     }
 
-    bool sendRequest(const std::shared_ptr<vehicle_interfaces::srv::ControlServer::Request> req, vehicle_interfaces::msg::ControlServer& res)
+    bool sendRequest(const std::shared_ptr<vehicle_interfaces::srv::ControlServer::Request> req, vehicle_interfaces::msg::ControlServerStatus& res)
     {
         auto result = this->controlServerClient_->async_send_request(req);
 #if ROS_DISTRO == 0
@@ -94,13 +94,13 @@ void PrintControllerInfo(const vehicle_interfaces::msg::ControllerInfo& info)
             (info.pub_type == vehicle_interfaces::msg::ControllerInfo::PUB_TYPE_CONTROLLER_CLIENT ? "PUB_TYPE_CONTROLLER_CLIENT" : "PUB_TYPE_BOTH")));
 }
 
-void PrintControlServer(const vehicle_interfaces::msg::ControlServer& res)
+void PrintControlServer(const vehicle_interfaces::msg::ControlServerStatus& res)
 {
     printf("Controller service name: %s\n", res.controller_service_name.c_str());
-    printf("Output timer   (%-5.3fms): %s\n", res.server_output_period_ms, res.server_output_timer_status == vehicle_interfaces::msg::ControlServer::TIMER_STATUS_START ? "On" : "Off");
-    printf("Safety timer   (%-5.3fms): %s\n", res.server_safety_period_ms, res.server_safety_timer_status == vehicle_interfaces::msg::ControlServer::TIMER_STATUS_START ? "On" : "Off");
-    printf("IDClient timer (%-5.3fms): %s\n", res.server_idclient_period_ms, res.server_idclient_timer_status == vehicle_interfaces::msg::ControlServer::TIMER_STATUS_START ? "On" : "Off");
-    printf("Publish timer  (%-5.3fms): %s\n", res.server_publish_period_ms, res.server_publish_timer_status == vehicle_interfaces::msg::ControlServer::TIMER_STATUS_START ? "On" : "Off");
+    printf("Output timer   (%-5.3lfms): %s\n", res.server_output_period_ms, res.server_output_timer_status == vehicle_interfaces::msg::ControlServerStatus::TIMER_STATUS_START ? "On" : "Off");
+    printf("Safety timer   (%-5.3lfms): %s\n", res.server_safety_period_ms, res.server_safety_timer_status == vehicle_interfaces::msg::ControlServerStatus::TIMER_STATUS_START ? "On" : "Off");
+    printf("IDClient timer (%-5.3lfms): %s\n", res.server_idclient_period_ms, res.server_idclient_timer_status == vehicle_interfaces::msg::ControlServerStatus::TIMER_STATUS_START ? "On" : "Off");
+    printf("Publish timer  (%-5.3lfms): %s\n", res.server_publish_period_ms, res.server_publish_timer_status == vehicle_interfaces::msg::ControlServerStatus::TIMER_STATUS_START ? "On" : "Off");
 }
 
 int main(int argc, char** argv)
@@ -166,10 +166,11 @@ int main(int argc, char** argv)
         else if (inputStrVec[0] == "r")
         {
             auto req = std::make_shared<vehicle_interfaces::srv::ControlServer::Request>();
-            req->request.controller_action == vehicle_interfaces::msg::ControlServer::CONTROLLER_ACTION_REMOVE;
+            req->request = vehicle_interfaces::msg::ControlServerStatus();
+            req->request.controller_action = vehicle_interfaces::msg::ControlServerStatus::CONTROLLER_ACTION_REMOVE;
             req->request.controller_service_name = inputStrVec[1];
 
-            vehicle_interfaces::msg::ControlServer res;
+            vehicle_interfaces::msg::ControlServerStatus res;
             if (!node->sendRequest(req, res))
                 printf("Request control server failed\n");
             printf("================ Control Server\n");
@@ -178,10 +179,11 @@ int main(int argc, char** argv)
         else if (inputStrVec[0] == "s")
         {
             auto req = std::make_shared<vehicle_interfaces::srv::ControlServer::Request>();
-            req->request.controller_action == vehicle_interfaces::msg::ControlServer::CONTROLLER_ACTION_SELECT;
+            req->request = vehicle_interfaces::msg::ControlServerStatus();
+            req->request.controller_action = vehicle_interfaces::msg::ControlServerStatus::CONTROLLER_ACTION_SELECT;
             req->request.controller_service_name = inputStrVec[1];
 
-            vehicle_interfaces::msg::ControlServer res;
+            vehicle_interfaces::msg::ControlServerStatus res;
             if (!node->sendRequest(req, res))
                 printf("Request control server failed\n");
             printf("================ Control Server\n");
@@ -190,7 +192,8 @@ int main(int argc, char** argv)
         else if (inputStrVec[0] == "st" && inputStrVec.size() > 2)
         {
             auto req = std::make_shared<vehicle_interfaces::srv::ControlServer::Request>();
-            req->request.controller_action == vehicle_interfaces::msg::ControlServer::SERVER_ACTION_SET_TIMER;
+            req->request = vehicle_interfaces::msg::ControlServerStatus();
+            req->request.server_action = vehicle_interfaces::msg::ControlServerStatus::SERVER_ACTION_SET_TIMER;
             try
             {
                 if (inputStrVec[1] == "0")
@@ -209,7 +212,13 @@ int main(int argc, char** argv)
                 printf("Invalid timer status. Should be 0 to 2\n");
             }
 
-            vehicle_interfaces::msg::ControlServer res;
+            printf("Server action: %d\n", req->request.server_action);
+            printf("Output timer status: %d\n", req->request.server_output_timer_status);
+            printf("Safety timer status: %d\n", req->request.server_safety_timer_status);
+            printf("IDClient timer status: %d\n", req->request.server_idclient_timer_status);
+            printf("Publish timer status: %d\n", req->request.server_publish_timer_status);
+
+            vehicle_interfaces::msg::ControlServerStatus res;
             if (!node->sendRequest(req, res))
                 printf("Request control server failed\n");
             printf("================ Control Server\n");
@@ -218,17 +227,18 @@ int main(int argc, char** argv)
         else if (inputStrVec[0] == "sp" && inputStrVec.size() > 2)
         {
             auto req = std::make_shared<vehicle_interfaces::srv::ControlServer::Request>();
-            req->request.controller_action == vehicle_interfaces::msg::ControlServer::SERVER_ACTION_SET_PERIOD;
+            req->request = vehicle_interfaces::msg::ControlServerStatus();
+            req->request.server_action = vehicle_interfaces::msg::ControlServerStatus::SERVER_ACTION_SET_PERIOD;
             try
             {
                 if (inputStrVec[1] == "0")
-                    req->request.server_output_timer_status = std::stod(inputStrVec[2]);
+                    req->request.server_output_period_ms = std::stod(inputStrVec[2]);
                 else if (inputStrVec[1] == "1")
-                    req->request.server_safety_timer_status = std::stod(inputStrVec[2]);
+                    req->request.server_safety_period_ms = std::stod(inputStrVec[2]);
                 else if (inputStrVec[1] == "2")
-                    req->request.server_idclient_timer_status = std::stod(inputStrVec[2]);
+                    req->request.server_idclient_period_ms = std::stod(inputStrVec[2]);
                 else if (inputStrVec[1] == "3")
-                    req->request.server_publish_timer_status = std::stod(inputStrVec[2]);
+                    req->request.server_publish_period_ms = std::stod(inputStrVec[2]);
                 else
                     continue;
             }
@@ -237,7 +247,13 @@ int main(int argc, char** argv)
                 printf("Invalid period. Should be a float number\n");
             }
 
-            vehicle_interfaces::msg::ControlServer res;
+            printf("Server action: %d\n", req->request.server_action);
+            printf("Output timer period: %.2lf\n", req->request.server_output_period_ms);
+            printf("Safety timer period: %.2lf\n", req->request.server_safety_period_ms);
+            printf("IDClient timer period: %.2lf\n", req->request.server_idclient_period_ms);
+            printf("Publish timer period: %.2lf\n", req->request.server_publish_period_ms);
+
+            vehicle_interfaces::msg::ControlServerStatus res;
             if (!node->sendRequest(req, res))
                 printf("Request control server failed\n");
             printf("================ Control Server\n");

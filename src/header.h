@@ -24,7 +24,7 @@
 #include "vehicle_interfaces/msg/chassis_info.hpp"
 #include "vehicle_interfaces/msg/control_chassis.hpp"
 #include "vehicle_interfaces/msg/controller_info.hpp"
-#include "vehicle_interfaces/msg/control_server.hpp"
+#include "vehicle_interfaces/msg/control_server_status.hpp"
 #include "vehicle_interfaces/msg/control_steering_wheel.hpp"
 
 #include "vehicle_interfaces/srv/control_chassis_reg.hpp"
@@ -69,12 +69,15 @@ public:
 
     std::string serviceName = "controlserver";
     std::string topicName = "controlserver";
-    double publishInterval_ms = 50.0;
 
-    bool enableOutput = false;
+    bool enableOutput = true;
     double outputPeriod_ms = 80;
+    bool enableSafetyCheck = true;
     double safetyCheckPeriod_ms = 50.0;
+    bool enableIdclientCheck = true;
     double idclientCheckPeriod_ms = 1000.0;
+    bool enablePublish = true;
+    double publishPeriod_ms = 50.0;
 
 private:
     void _getParams()
@@ -92,12 +95,15 @@ private:
 
         this->get_parameter("serviceName", this->serviceName);
         this->get_parameter("topicName", this->topicName);
-        this->get_parameter("publishInterval_ms", this->publishInterval_ms);
 
         this->get_parameter("enableOutput", this->enableOutput);
         this->get_parameter("outputPeriod_ms", this->outputPeriod_ms);
+        this->get_parameter("enableSafetyCheck", this->enableSafetyCheck);
         this->get_parameter("safetyCheckPeriod_ms", this->safetyCheckPeriod_ms);
+        this->get_parameter("enableIdclientCheck", this->enableIdclientCheck);
         this->get_parameter("idclientCheckPeriod_ms", this->idclientCheckPeriod_ms);
+        this->get_parameter("enablePublish", this->enablePublish);
+        this->get_parameter("publishPeriod_ms", this->publishPeriod_ms);
     }
 
     rcl_interfaces::msg::SetParametersResult _paramsCallback(const std::vector<rclcpp::Parameter>& params)
@@ -142,12 +148,15 @@ public:
 
         this->declare_parameter<std::string>("serviceName", this->serviceName);
         this->declare_parameter<std::string>("topicName", this->topicName);
-        this->declare_parameter<double>("publishInterval_ms", this->publishInterval_ms);
 
         this->declare_parameter<bool>("enableOutput", this->enableOutput);
         this->declare_parameter<double>("outputPeriod_ms", this->outputPeriod_ms);
+        this->declare_parameter<bool>("enableSafetyCheck", this->enableSafetyCheck);
         this->declare_parameter<double>("safetyCheckPeriod_ms", this->safetyCheckPeriod_ms);
+        this->declare_parameter<bool>("enableIdclientCheck", this->enableIdclientCheck);
         this->declare_parameter<double>("idclientCheckPeriod_ms", this->idclientCheckPeriod_ms);
+        this->declare_parameter<bool>("enablePublish", this->enablePublish);
+        this->declare_parameter<double>("publishPeriod_ms", this->publishPeriod_ms);
 
         this->_getParams();
 
@@ -163,35 +172,6 @@ public:
 
 
 
-/**
- * TODO:
- * Feature:
- * [x] Control reg server
- * [x] Control req server
- * [x] Add controller
- * [x] Init chassis info (e.g. pred model)
- * [x] cvtSignal (rewrite from py_controlserver/genMotorPWM.py)
- * [x] joystick controller
- * [x] Read chassis.json
- * [x] Read joystick.json
- * [x] Connect jim id server
- * [x] Add safety thread
- * [x] Controller switch (consider timestamp)
- * [x] Publisher thread for chassis signal
- * [x] Higher priority interruption
- * [x] Dynamic controller removal
- * 
- * Functionality test:
- * [x] Test control reg server
- * [x] Test control req server
- * [x] Test joystick controller
- * [x] Test idclient
- * [x] Test safety
- * [x] Test controller switch
- * [x] Test publisher
- * [x] Test dynamic controller addition and removal
- * [x] Test higher priority interruption
- */
 class ControlServer : public vehicle_interfaces::VehicleServiceNode
 {
 private:
@@ -318,7 +298,7 @@ private:
         msg.stamp_type = this->getTimestampType();
         msg.stamp = this->getTimestamp();
         msg.stamp_offset = this->getCorrectDuration().nanoseconds();
-        msg.ref_publish_time_ms = this->params_->publishInterval_ms;
+        msg.ref_publish_time_ms = this->params_->publishPeriod_ms;
     }
 
     /**
@@ -1279,94 +1259,171 @@ private:
             response->response = false;
             return;
         }
+
+        /**
+         * Controller action.
+         */
         response->response = true;
-        if (request->request.controller_action == vehicle_interfaces::msg::ControlServer::CONTROLLER_ACTION_SELECT)
+        if (request->request.controller_action == vehicle_interfaces::msg::ControlServerStatus::CONTROLLER_ACTION_SELECT)
         {
             response->response &= this->_setOutputController(request->request.controller_service_name);
         }
-        else if (request->request.controller_action == vehicle_interfaces::msg::ControlServer::CONTROLLER_ACTION_REMOVE)
+        else if (request->request.controller_action == vehicle_interfaces::msg::ControlServerStatus::CONTROLLER_ACTION_REMOVE)
         {
             response->response &= this->_removeController(request->request.controller_service_name);
         }
-        if (request->request.server_action & vehicle_interfaces::msg::ControlServer::SERVER_ACTION_SET_PERIOD > 0)
+
+        /**
+         * Server action.
+         */
+        if ((request->request.server_action & vehicle_interfaces::msg::ControlServerStatus::SERVER_ACTION_SET_PERIOD) > 0)
         {
             if (request->request.server_output_period_ms > 0)
             {
-                this->controllerSwitchTm_->setPeriod(request->request.server_output_period_ms);
+                if (this->controllerSwitchTm_)
+                    this->controllerSwitchTm_->setPeriod(request->request.server_output_period_ms);
                 this->controllerSwitchTmPeriod_ms_ = request->request.server_output_period_ms;
             }
             if (request->request.server_safety_period_ms > 0)
             {
-                this->safetyTm_->setPeriod(request->request.server_safety_period_ms);
+                if (this->safetyTm_)
+                    this->safetyTm_->setPeriod(request->request.server_safety_period_ms);
                 this->safetyTmPeriod_ms_ = request->request.server_safety_period_ms;
             }
             if (request->request.server_idclient_period_ms > 0)
             {
-                this->idclientTm_->setPeriod(request->request.server_idclient_period_ms);
+                if (this->idclientTm_)
+                    this->idclientTm_->setPeriod(request->request.server_idclient_period_ms);
                 this->idclientTmPeriod_ms_ = request->request.server_idclient_period_ms;
             }
             if (request->request.server_publish_period_ms > 0)
             {
-                this->publishTm_->setPeriod(request->request.server_publish_period_ms);
+                if (this->publishTm_)
+                    this->publishTm_->setPeriod(request->request.server_publish_period_ms);
                 this->publishTmPeriod_ms_ = request->request.server_publish_period_ms;
             }
         }
-        if (request->request.server_action & vehicle_interfaces::msg::ControlServer::SERVER_ACTION_SET_TIMER > 0)
+        if ((request->request.server_action & vehicle_interfaces::msg::ControlServerStatus::SERVER_ACTION_SET_TIMER) > 0)
         {
-            if (request->request.server_output_timer_status == vehicle_interfaces::msg::ControlServer::TIMER_STATUS_START)
+            if (request->request.server_output_timer_status == vehicle_interfaces::msg::ControlServerStatus::TIMER_STATUS_START)
             {
-                this->controllerSwitchTm_->start();
-                this->controllerSwitchTmF_ = true;
+                if (this->controllerSwitchTmPeriod_ms_ <= 0)
+                {
+                    response->response = false;
+                    response->reason = "Invalid output timer period.";
+                }
+                else
+                    this->controllerSwitchTmF_ = true;
+
+                if (this->controllerSwitchTm_)
+                    this->controllerSwitchTm_->start();
+                else
+                {
+                    this->controllerSwitchTm_ = std::make_shared<vehicle_interfaces::LiteTimer>(this->controllerSwitchTmPeriod_ms_, std::bind(&ControlServer::_controllerSwitchCbFunc, this));
+                    this->controllerSwitchTm_->start();
+                }
             }
-            else if (request->request.server_output_timer_status == vehicle_interfaces::msg::ControlServer::TIMER_STATUS_STOP)
+            else if (request->request.server_output_timer_status == vehicle_interfaces::msg::ControlServerStatus::TIMER_STATUS_STOP)
             {
-                this->controllerSwitchTm_->stop();
+                if (this->controllerSwitchTm_)
+                    this->controllerSwitchTm_->stop();
                 this->controllerSwitchTmF_ = false;
             }
-            if (request->request.server_safety_timer_status == vehicle_interfaces::msg::ControlServer::TIMER_STATUS_START)
+            if (request->request.server_safety_timer_status == vehicle_interfaces::msg::ControlServerStatus::TIMER_STATUS_START)
             {
-                this->safetyTm_->start();
-                this->safetyTmF_ = true;
+                if (this->safetyTmPeriod_ms_ <= 0)
+                {
+                    response->response = false;
+                    response->reason = "Invalid safety timer period.";
+                }
+                else
+                    this->safetyTmF_ = true;
+
+                if (this->safetyTm_)
+                    this->safetyTm_->start();
+                else
+                {
+                    this->safetyTm_ = std::make_shared<vehicle_interfaces::LiteTimer>(this->safetyTmPeriod_ms_, std::bind(&ControlServer::_safetyCbFunc, this));
+                    this->safetyTm_->start();
+                }
             }
-            else if (request->request.server_safety_timer_status == vehicle_interfaces::msg::ControlServer::TIMER_STATUS_STOP)
+            else if (request->request.server_safety_timer_status == vehicle_interfaces::msg::ControlServerStatus::TIMER_STATUS_STOP)
             {
-                this->safetyTm_->stop();
+                if (this->safetyTm_)
+                    this->safetyTm_->stop();
                 this->safetyTmF_ = false;
             }
-            if (request->request.server_idclient_timer_status == vehicle_interfaces::msg::ControlServer::TIMER_STATUS_START)
+            if (request->request.server_idclient_timer_status == vehicle_interfaces::msg::ControlServerStatus::TIMER_STATUS_START)
             {
-                this->idclientTm_->start();
-                this->idclientTmF_ = true;
+                if (this->idclientTmPeriod_ms_ <= 0)
+                {
+                    response->response = false;
+                    response->reason = "Invalid idclient timer period.";
+                }
+                else
+                    this->idclientTmF_ = true;
+
+                if (this->idclientTm_)
+                    this->idclientTm_->start();
+                else
+                {
+                    this->idclientTm_ = std::make_shared<vehicle_interfaces::LiteTimer>(this->idclientTmPeriod_ms_, std::bind(&ControlServer::_idclientCbFunc, this));
+                    this->idclientTm_->start();
+                }
             }
-            else if (request->request.server_idclient_timer_status == vehicle_interfaces::msg::ControlServer::TIMER_STATUS_STOP)
+            else if (request->request.server_idclient_timer_status == vehicle_interfaces::msg::ControlServerStatus::TIMER_STATUS_STOP)
             {
-                this->idclientTm_->stop();
+                if (this->idclientTm_)
+                    this->idclientTm_->stop();
                 this->idclientTmF_ = false;
             }
-            if (request->request.server_publish_timer_status == vehicle_interfaces::msg::ControlServer::TIMER_STATUS_START)
+            if (request->request.server_publish_timer_status == vehicle_interfaces::msg::ControlServerStatus::TIMER_STATUS_START)
             {
-                this->publishTm_->start();
-                this->publishTmF_ = true;
+                if (this->publishTmPeriod_ms_ <= 0)
+                {
+                    response->response = false;
+                    response->reason = "Invalid publish timer period.";
+                }
+                else
+                    this->publishTmF_ = true;
+
+                if (this->publishTm_)
+                    this->publishTm_->start();
+                else
+                {
+                    this->publishTm_ = std::make_shared<vehicle_interfaces::LiteTimer>(this->publishTmPeriod_ms_, std::bind(&ControlServer::_publishCbFunc, this));
+                    this->publishTm_->start();
+                }
             }
-            else if (request->request.server_publish_timer_status == vehicle_interfaces::msg::ControlServer::TIMER_STATUS_STOP)
+            else if (request->request.server_publish_timer_status == vehicle_interfaces::msg::ControlServerStatus::TIMER_STATUS_STOP)
             {
-                this->publishTm_->stop();
+                if (this->publishTm_)
+                    this->publishTm_->stop();
                 this->publishTmF_ = false;
             }
         }
         auto [conIdx, conName] = this->_getOutputControllerPos();
-        vehicle_interfaces::msg::ControlServer res;
+        vehicle_interfaces::msg::ControlServerStatus res;
         res.controller_service_name = conName;
-        res.server_output_timer_status = this->controllerSwitchTmF_ ? vehicle_interfaces::msg::ControlServer::TIMER_STATUS_START : vehicle_interfaces::msg::ControlServer::TIMER_STATUS_STOP;
+        res.server_output_timer_status = this->controllerSwitchTmF_ ? vehicle_interfaces::msg::ControlServerStatus::TIMER_STATUS_START : vehicle_interfaces::msg::ControlServerStatus::TIMER_STATUS_STOP;
         res.server_output_period_ms = this->controllerSwitchTmPeriod_ms_;
-        res.server_safety_timer_status = this->safetyTmF_ ? vehicle_interfaces::msg::ControlServer::TIMER_STATUS_START : vehicle_interfaces::msg::ControlServer::TIMER_STATUS_STOP;
+        res.server_safety_timer_status = this->safetyTmF_ ? vehicle_interfaces::msg::ControlServerStatus::TIMER_STATUS_START : vehicle_interfaces::msg::ControlServerStatus::TIMER_STATUS_STOP;
         res.server_safety_period_ms = this->safetyTmPeriod_ms_;
-        res.server_idclient_timer_status = this->idclientTmF_ ? vehicle_interfaces::msg::ControlServer::TIMER_STATUS_START : vehicle_interfaces::msg::ControlServer::TIMER_STATUS_STOP;
+        res.server_idclient_timer_status = this->idclientTmF_ ? vehicle_interfaces::msg::ControlServerStatus::TIMER_STATUS_START : vehicle_interfaces::msg::ControlServerStatus::TIMER_STATUS_STOP;
         res.server_idclient_period_ms = this->idclientTmPeriod_ms_;
-        res.server_publish_timer_status = this->publishTmF_ ? vehicle_interfaces::msg::ControlServer::TIMER_STATUS_START : vehicle_interfaces::msg::ControlServer::TIMER_STATUS_STOP;
+        res.server_publish_timer_status = this->publishTmF_ ? vehicle_interfaces::msg::ControlServerStatus::TIMER_STATUS_START : vehicle_interfaces::msg::ControlServerStatus::TIMER_STATUS_STOP;
         res.server_publish_period_ms = this->publishTmPeriod_ms_;
         res.chassis_info = this->cInfo_;
         response->status = res;
+
+        RCLCPP_INFO(this->get_logger(), "[ControlServer::_statusServerCbFunc] Output timer status: %s", this->controllerSwitchTmF_ ? "start" : "stop");
+        RCLCPP_INFO(this->get_logger(), "[ControlServer::_statusServerCbFunc] Output timer period: %.2lf ms", this->controllerSwitchTmPeriod_ms_.load());
+        RCLCPP_INFO(this->get_logger(), "[ControlServer::_statusServerCbFunc] Safety timer status: %s", this->safetyTmF_ ? "start" : "stop");
+        RCLCPP_INFO(this->get_logger(), "[ControlServer::_statusServerCbFunc] Safety timer period: %.2lf ms", this->safetyTmPeriod_ms_.load());
+        RCLCPP_INFO(this->get_logger(), "[ControlServer::_statusServerCbFunc] IDClient timer status: %s", this->idclientTmF_ ? "start" : "stop");
+        RCLCPP_INFO(this->get_logger(), "[ControlServer::_statusServerCbFunc] IDClient timer period: %.2lf ms", this->idclientTmPeriod_ms_.load());
+        RCLCPP_INFO(this->get_logger(), "[ControlServer::_statusServerCbFunc] Publish timer status: %s", this->publishTmF_ ? "start" : "stop");
+        RCLCPP_INFO(this->get_logger(), "[ControlServer::_statusServerCbFunc] Publish timer period: %.2lf ms", this->publishTmPeriod_ms_.load());
     }
 
 public:
@@ -1439,32 +1496,50 @@ public:
             }
 
             // Create idclient timer.
+            this->idclientTmF_ = params->enableIdclientCheck;
             this->idclientTmPeriod_ms_ = params->idclientCheckPeriod_ms;
             RCLCPP_INFO(this->get_logger(), "[ControlServer] Initializing idclient timer...");
-            this->idclientTm_ = std::make_shared<vehicle_interfaces::LiteTimer>(params->idclientCheckPeriod_ms, std::bind(&ControlServer::_idclientCbFunc, this));
-            this->idclientTm_->start();
+            if (params->idclientCheckPeriod_ms > 0)
+            {
+                this->idclientTm_ = std::make_shared<vehicle_interfaces::LiteTimer>(params->idclientCheckPeriod_ms, std::bind(&ControlServer::_idclientCbFunc, this));
+                if (params->enableIdclientCheck)
+                    this->idclientTm_->start();
+            }
 
             // Create safety timer.
+            this->safetyTmF_ = params->enableSafetyCheck;
             this->safetyTmPeriod_ms_ = params->safetyCheckPeriod_ms;
             RCLCPP_INFO(this->get_logger(), "[ControlServer] Initializing safety timer...");
             this->emPs_.fill(1);
-            this->safetyTm_ = std::make_shared<vehicle_interfaces::LiteTimer>(params->safetyCheckPeriod_ms, std::bind(&ControlServer::_safetyCbFunc, this));
-            this->safetyTm_->start();
+            if (params->safetyCheckPeriod_ms > 0)
+            {
+                this->safetyTm_ = std::make_shared<vehicle_interfaces::LiteTimer>(params->safetyCheckPeriod_ms, std::bind(&ControlServer::_safetyCbFunc, this));
+                if (params->enableSafetyCheck)
+                    this->safetyTm_->start();
+            }
 
             // Create controller switch timer.
-            this->controllerSwitchTmPeriod_ms_ = params->outputPeriod_ms;
             this->controllerSwitchTmF_ = params->enableOutput;
+            this->controllerSwitchTmPeriod_ms_ = params->outputPeriod_ms;
             RCLCPP_INFO(this->get_logger(), "[ControlServer] Initializing controller switch timer...");
-            this->controllerSwitchTm_ = std::make_shared<vehicle_interfaces::LiteTimer>(params->outputPeriod_ms, std::bind(&ControlServer::_controllerSwitchCbFunc, this));
-            if (params->enableOutput)
-                this->controllerSwitchTm_->start();
+            if (params->outputPeriod_ms > 0)
+            {
+                this->controllerSwitchTm_ = std::make_shared<vehicle_interfaces::LiteTimer>(params->outputPeriod_ms, std::bind(&ControlServer::_controllerSwitchCbFunc, this));
+                if (params->enableOutput)
+                    this->controllerSwitchTm_->start();
+            }
 
             // Create publisher timer.
-            this->publishTmPeriod_ms_ = params->publishInterval_ms;
+            this->publishTmF_ = params->enablePublish;
+            this->publishTmPeriod_ms_ = params->publishPeriod_ms;
             RCLCPP_INFO(this->get_logger(), "[ControlServer] Initializing publisher timer...");
             this->publisher_ = this->create_publisher<vehicle_interfaces::msg::Chassis>(params->topicName, 10);
-            this->publishTm_ = std::make_shared<vehicle_interfaces::LiteTimer>(params->publishInterval_ms, std::bind(&ControlServer::_publishCbFunc, this));
-            this->publishTm_->start();
+            if (params->publishPeriod_ms > 0)
+            {
+                this->publishTm_ = std::make_shared<vehicle_interfaces::LiteTimer>(params->publishPeriod_ms, std::bind(&ControlServer::_publishCbFunc, this));
+                if (params->enablePublish)
+                    this->publishTm_->start();
+            }
 
             // Create register and request services.
             this->controllerInfoRegServer_ = this->create_service<vehicle_interfaces::srv::ControllerInfoReg>(params->serviceName + "_ControllerInfoReg", 
@@ -1504,36 +1579,28 @@ public:
 
         // Destroy publisher timer.
         if (this->publishTm_)
-        {
             this->publishTm_->destroy();
-        }
-        // Join and delete controller switch thread.
+        // Destroy controller switch timer.
         if (this->controllerSwitchTm_)
-        {
             this->controllerSwitchTm_->destroy();
-        }
-        // Join and delete safety thread.
+        // Destroy safety timer.
         if (this->safetyTm_)
-        {
             this->safetyTm_->destroy();
-        }
         // Destroy idclient timer.
         if (this->idclientTm_)
-        {
             this->idclientTm_->destroy();
-        }
+
         // Delete idclient.
         this->idclient_.reset(nullptr);
-        // Destroy joystick timer.
-        if (this->joystickTh_)
-        {
+
+        // Destroy joystick thread.
+        if (this->joystickTh_ && this->joystickTh_->joinable())
             this->joystickTh_->join();
-        }
+
         // Delete joystick.
         if (this->joystick_ != nullptr)
-        {
             fclose(this->joystick_);
-        }
+
         // Get all controller name and deleted by calling _removeController().
         auto tmp = this->_safeCall(&this->controllerIdx_, this->controllerLock_);
         for (const auto& serviceName : tmp)
