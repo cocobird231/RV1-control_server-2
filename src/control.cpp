@@ -17,6 +17,8 @@
 #include <mutex>
 
 #include "rclcpp/rclcpp.hpp"
+#include "vehicle_interfaces/msg_json.h"
+#include "vehicle_interfaces/params.h"
 #include "vehicle_interfaces/utils.h"
 #include "vehicle_interfaces/msg/controller_info.hpp"
 #include "vehicle_interfaces/srv/controller_info_req.hpp"
@@ -28,71 +30,26 @@
 
 using namespace std::chrono_literals;
 
-class TestNode : public rclcpp::Node
-{
-private:
-    rclcpp::Node::SharedPtr controlServerClientNode_;
-    rclcpp::Client<vehicle_interfaces::srv::ControlServer>::SharedPtr controlServerClient_;
+std::atomic<bool> __global_exit_flag = false;
 
-    rclcpp::Node::SharedPtr controllerInfoReqClientNode_;
-    rclcpp::Client<vehicle_interfaces::srv::ControllerInfoReq>::SharedPtr controllerInfoReqClient_;
+class Params : public vehicle_interfaces::GenericParams
+{
+public:
+    std::string serviceName = "controlserver_0";
+
+private:
+    void _getParams()
+    {
+        this->get_parameter("serviceName", this->serviceName);
+    }
 
 public:
-    TestNode(const std::string& nodeName, const std::string& serviceName) : rclcpp::Node(nodeName)
+    Params(std::string nodeName) : vehicle_interfaces::GenericParams(nodeName)
     {
-        this->controlServerClientNode_ = std::make_shared<rclcpp::Node>(nodeName + "_controlserver_client");
-        this->controlServerClient_ = this->controlServerClientNode_->create_client<vehicle_interfaces::srv::ControlServer>(serviceName);
-
-        this->controllerInfoReqClientNode_ = std::make_shared<rclcpp::Node>(nodeName + "_controllerinfo_req_client");
-        this->controllerInfoReqClient_ = this->controllerInfoReqClientNode_->create_client<vehicle_interfaces::srv::ControllerInfoReq>(serviceName + "_ControllerInfoReq");
-    }
-
-    bool sendRequest(const std::shared_ptr<vehicle_interfaces::srv::ControlServer::Request> req, vehicle_interfaces::msg::ControlServerStatus& res)
-    {
-        auto result = this->controlServerClient_->async_send_request(req);
-#if ROS_DISTRO == 0
-        if (rclcpp::spin_until_future_complete(this->controlServerClientNode_, result, 200ms) == rclcpp::executor::FutureReturnCode::SUCCESS)
-#else
-        if (rclcpp::spin_until_future_complete(this->controlServerClientNode_, result, 200ms) == rclcpp::FutureReturnCode::SUCCESS)
-#endif
-        {
-            auto response = result.get();
-            res = response->status;
-            return response->response;
-        }
-        return false;
-    }
-
-    bool sendRequest(const std::shared_ptr<vehicle_interfaces::srv::ControllerInfoReq::Request> req, std::vector<vehicle_interfaces::msg::ControllerInfo>& controlInfoVec)
-    {
-        auto result = this->controllerInfoReqClient_->async_send_request(req);
-#if ROS_DISTRO == 0
-        if (rclcpp::spin_until_future_complete(this->controllerInfoReqClientNode_, result, 200ms) == rclcpp::executor::FutureReturnCode::SUCCESS)
-#else
-        if (rclcpp::spin_until_future_complete(this->controllerInfoReqClientNode_, result, 200ms) == rclcpp::FutureReturnCode::SUCCESS)
-#endif
-        {
-            auto response = result.get();
-            if (response->response)
-                controlInfoVec = response->control_info_vec;
-            return response->response;
-        }
-        return false;
+        this->declare_parameter<std::string>("serviceName", this->serviceName);
+        this->_getParams();
     }
 };
-
-void PrintControllerInfo(const vehicle_interfaces::msg::ControllerInfo& info)
-{
-    printf("%s %-15s %-8s %-4.4f %-4.4f %-3d %s\n", info.service_name.c_str(), 
-        info.msg_type == vehicle_interfaces::msg::ControllerInfo::MSG_TYPE_CHASSIS ? "Chassis" : "SteeringWheel", 
-        info.controller_mode == vehicle_interfaces::msg::ControllerInfo::CONTROLLER_MODE_TOPIC ? "Topic" : "Service", 
-        info.timeout_ms, 
-        info.period_ms, 
-        info.privilege, 
-        info.pub_type == vehicle_interfaces::msg::ControllerInfo::PUB_TYPE_NONE ? "PUB_TYPE_NONE" : 
-            (info.pub_type == vehicle_interfaces::msg::ControllerInfo::PUB_TYPE_CONTROLLER_SERVER ? "PUB_TYPE_CONTROLLER_SERVER" : 
-            (info.pub_type == vehicle_interfaces::msg::ControllerInfo::PUB_TYPE_CONTROLLER_CLIENT ? "PUB_TYPE_CONTROLLER_CLIENT" : "PUB_TYPE_BOTH")));
-}
 
 void PrintControlServer(const vehicle_interfaces::msg::ControlServerStatus& res)
 {
@@ -103,19 +60,60 @@ void PrintControlServer(const vehicle_interfaces::msg::ControlServerStatus& res)
     printf("Publish timer  (%-5.3lfms): %s\n", res.server_publish_period_ms, res.server_publish_timer_status == vehicle_interfaces::msg::ControlServerStatus::TIMER_STATUS_START ? "On" : "Off");
 }
 
+vehicle_interfaces::ReasonResult<bool> SendRequest(std::string serviceName, vehicle_interfaces::srv::ControlServer::Request::SharedPtr req, vehicle_interfaces::msg::ControlServerStatus& dst)
+{
+    auto node = rclcpp::Node::make_shared("controlservertest_tmp_node");
+    auto client = node->create_client<vehicle_interfaces::srv::ControlServer>(serviceName);
+    auto result = client->async_send_request(req);
+#if ROS_DISTRO == 0
+    if (rclcpp::spin_until_future_complete(node, result, 500ms) == rclcpp::executor::FutureReturnCode::SUCCESS)
+#else
+    if (rclcpp::spin_until_future_complete(node, result, 500ms) == rclcpp::FutureReturnCode::SUCCESS)
+#endif
+    {
+        auto res = result.get();
+        dst = res->status;
+        return { res->response, res->reason };
+    }
+    return { false, "Request failed." };
+}
+
+vehicle_interfaces::ReasonResult<bool> SendRequest(std::string serviceName, vehicle_interfaces::srv::ControllerInfoReq::Request::SharedPtr req, std::vector<vehicle_interfaces::msg::ControllerInfo>& dst)
+{
+    auto node = rclcpp::Node::make_shared("controlservertest_tmp_node");
+    auto client = node->create_client<vehicle_interfaces::srv::ControllerInfoReq>(serviceName);
+    auto result = client->async_send_request(req);
+#if ROS_DISTRO == 0
+    if (rclcpp::spin_until_future_complete(node, result, 500ms) == rclcpp::executor::FutureReturnCode::SUCCESS)
+#else
+    if (rclcpp::spin_until_future_complete(node, result, 500ms) == rclcpp::FutureReturnCode::SUCCESS)
+#endif
+    {
+        auto res = result.get();
+        dst = res->control_info_vec;
+        return { res->response, "" };
+    }
+    return { false, "Request failed." };
+}
+
 int main(int argc, char** argv)
 {
-    rclcpp::init(argc, argv);
-    auto node = std::make_shared<TestNode>(NODE_NAME, SERVICE_NAME);
-    auto executor = std::make_shared<rclcpp::executors::SingleThreadedExecutor>();
-    executor->add_node(node);
-    std::thread execTh(vehicle_interfaces::SpinExecutor, executor, NODE_NAME, 1000.0);
+    // ctrl-c handler
+    signal(SIGINT, 
+        [](int)
+        {
+            __global_exit_flag = true;
+        });
 
-    bool stopF = false;
+    rclcpp::init(argc, argv);
+    auto params = std::make_shared<Params>("controlservertest_params_node");
+
     printf("/** \n\
+ * Get information (ControlServerStatus): \n\
+ *   i \n\
+ * \n\
  * Get controller list (ControllerInfo): \n\
- *   g <service_name> \n\
- *   g all \n\
+ *   c \n\
  * \n\
  * Remove controller (ControlServer): \n\
  *   r <service_name> \n\
@@ -130,8 +128,10 @@ int main(int argc, char** argv)
  * Quit: \n\
  *   q\n\
  */\n");
-    while (!stopF)
+
+    while (!__global_exit_flag)
     {
+        std::this_thread::sleep_for(100ms);
         printf(">");
         std::string inputStr;
         std::getline(std::cin, inputStr);
@@ -140,41 +140,58 @@ int main(int argc, char** argv)
             continue;
         auto inputStrVec = vehicle_interfaces::split(inputStr, ", ");
         if (inputStrVec.size() == 1 && inputStrVec[0] == "q")
-            stopF = true;
-        else if (inputStrVec.size() < 2)
-            continue;
-        if (inputStrVec[0] == "g")
+            __global_exit_flag = true;
+        else if (inputStrVec.size() == 1 && inputStrVec[0] == "i")
+        {
+            auto req = std::make_shared<vehicle_interfaces::srv::ControlServer::Request>();
+            vehicle_interfaces::msg::ControlServerStatus dst;
+            auto res = SendRequest(params->serviceName, req, dst);
+            if (res.result)
+                std::cout << vehicle_interfaces::msg_show::ControlServerStatus::hprint(dst) << std::endl;
+            else
+                std::cerr << "Request failed: " << res.reason << std::endl;
+        }
+        else if (inputStrVec.size() == 1 && inputStrVec[0] == "c")
         {
             auto req = std::make_shared<vehicle_interfaces::srv::ControllerInfoReq::Request>();
             req->service_name = "all";
 
-            std::vector<vehicle_interfaces::msg::ControllerInfo> controlInfoVec;
-            if (node->sendRequest(req, controlInfoVec))
+            std::vector<vehicle_interfaces::msg::ControllerInfo> dst;
+            auto res = SendRequest(params->serviceName + "_ControllerInfoReq", req, dst);
+            if (res.result)
             {
-                printf("================ Controller List\n");
-                for (int i = 0; i < controlInfoVec.size(); i++)
+                vehicle_interfaces::HierarchicalPrint hp;
+                hp.push(0, "Controller list");
+                for (int i = 0; i < dst.size(); i++)
                 {
-                    printf("[%d] ", i);
-                    PrintControllerInfo(controlInfoVec[i]);
+                    hp.push(1, "Controller " + std::to_string(i));
+                    hp.push(2, "Service name", vehicle_interfaces::msg_show::ControllerInfo::hprint(dst[i]));
                 }
+                std::cout << hp << std::endl;
             }
             else
-            {
-                printf("Get controller info failed\n");
-            }
+                std::cerr << "Request failed: " << res.reason << std::endl;
         }
-        else if (inputStrVec[0] == "r")
+        else if (inputStrVec.size() < 2)
+            continue;
+
+        // inputStrVec size is at least 2.
+        if (inputStrVec[0] == "r")
         {
             auto req = std::make_shared<vehicle_interfaces::srv::ControlServer::Request>();
             req->request = vehicle_interfaces::msg::ControlServerStatus();
             req->request.controller_action = vehicle_interfaces::msg::ControlServerStatus::CONTROLLER_ACTION_REMOVE;
             req->request.controller_service_name = inputStrVec[1];
 
-            vehicle_interfaces::msg::ControlServerStatus res;
-            if (!node->sendRequest(req, res))
-                printf("Request control server failed\n");
-            printf("================ Control Server\n");
-            PrintControlServer(res);
+            vehicle_interfaces::msg::ControlServerStatus dst;
+            auto res = SendRequest(params->serviceName, req, dst);
+            if (res.result)
+            {
+                printf("================ Control Server\n");
+                PrintControlServer(dst);
+            }
+            else
+                std::cerr << "Request failed: " << res.reason << std::endl;
         }
         else if (inputStrVec[0] == "s")
         {
@@ -183,11 +200,15 @@ int main(int argc, char** argv)
             req->request.controller_action = vehicle_interfaces::msg::ControlServerStatus::CONTROLLER_ACTION_SELECT;
             req->request.controller_service_name = inputStrVec[1];
 
-            vehicle_interfaces::msg::ControlServerStatus res;
-            if (!node->sendRequest(req, res))
-                printf("Request control server failed\n");
-            printf("================ Control Server\n");
-            PrintControlServer(res);
+            vehicle_interfaces::msg::ControlServerStatus dst;
+            auto res = SendRequest(params->serviceName, req, dst);
+            if (res.result)
+            {
+                printf("================ Control Server\n");
+                PrintControlServer(dst);
+            }
+            else
+                std::cerr << "Request failed: " << res.reason << std::endl;
         }
         else if (inputStrVec[0] == "st" && inputStrVec.size() > 2)
         {
@@ -218,11 +239,15 @@ int main(int argc, char** argv)
             printf("IDClient timer status: %d\n", req->request.server_idclient_timer_status);
             printf("Publish timer status: %d\n", req->request.server_publish_timer_status);
 
-            vehicle_interfaces::msg::ControlServerStatus res;
-            if (!node->sendRequest(req, res))
-                printf("Request control server failed\n");
-            printf("================ Control Server\n");
-            PrintControlServer(res);
+            vehicle_interfaces::msg::ControlServerStatus dst;
+            auto res = SendRequest(params->serviceName, req, dst);
+            if (res.result)
+            {
+                printf("================ Control Server\n");
+                PrintControlServer(dst);
+            }
+            else
+                std::cerr << "Request failed: " << res.reason << std::endl;
         }
         else if (inputStrVec[0] == "sp" && inputStrVec.size() > 2)
         {
@@ -253,17 +278,18 @@ int main(int argc, char** argv)
             printf("IDClient timer period: %.2lf\n", req->request.server_idclient_period_ms);
             printf("Publish timer period: %.2lf\n", req->request.server_publish_period_ms);
 
-            vehicle_interfaces::msg::ControlServerStatus res;
-            if (!node->sendRequest(req, res))
-                printf("Request control server failed\n");
-            printf("================ Control Server\n");
-            PrintControlServer(res);
+            vehicle_interfaces::msg::ControlServerStatus dst;
+            auto res = SendRequest(params->serviceName, req, dst);
+            if (res.result)
+            {
+                printf("================ Control Server\n");
+                PrintControlServer(dst);
+            }
+            else
+                std::cerr << "Request failed: " << res.reason << std::endl;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
     }
 
-    executor->cancel();
-    execTh.join();
     rclcpp::shutdown();
     return 0;
 }
