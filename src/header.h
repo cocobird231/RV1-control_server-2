@@ -63,10 +63,6 @@ public:
     int internalIDServerPort = 0;// Unused
     int internalIDServerDeviceID = 0;
 
-    std::string externalIDServerIP = "61.220.23.240";
-    std::string externalIDServerPort = "10000";
-    std::string externalIDServerDeviceID = "CAR1";
-
     std::string serviceName = "controlserver";
     std::string topicName = "controlserver";
 
@@ -88,10 +84,6 @@ private:
         this->get_parameter("internalIDServerIP", this->internalIDServerIP);
         this->get_parameter("internalIDServerPort", this->internalIDServerPort);
         this->get_parameter("internalIDServerDeviceID", this->internalIDServerDeviceID);
-
-        this->get_parameter("externalIDServerIP", this->externalIDServerIP);
-        this->get_parameter("externalIDServerPort", this->externalIDServerPort);
-        this->get_parameter("externalIDServerDeviceID", this->externalIDServerDeviceID);
 
         this->get_parameter("serviceName", this->serviceName);
         this->get_parameter("topicName", this->topicName);
@@ -141,10 +133,6 @@ public:
         this->declare_parameter<std::string>("internalIDServerIP", this->internalIDServerIP);
         this->declare_parameter<int>("internalIDServerPort", this->internalIDServerPort);
         this->declare_parameter<int>("internalIDServerDeviceID", this->internalIDServerDeviceID);
-
-        this->declare_parameter<std::string>("externalIDServerIP", this->externalIDServerIP);
-        this->declare_parameter<std::string>("externalIDServerPort", this->externalIDServerPort);
-        this->declare_parameter<std::string>("externalIDServerDeviceID", this->externalIDServerDeviceID);
 
         this->declare_parameter<std::string>("serviceName", this->serviceName);
         this->declare_parameter<std::string>("topicName", this->topicName);
